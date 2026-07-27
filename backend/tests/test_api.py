@@ -1631,6 +1631,91 @@ def test_confirmed_leave_adjustment_locks_unaffected_tasks_and_can_restore(
     }
 
 
+def test_confirmed_leave_merges_into_existing_same_order_task(
+    client: TestClient,
+):
+    part = client.post(
+        "/api/parts",
+        json={
+            "code": "LEAVE-MERGE",
+            "name": "同订单补班零件",
+            "standard_hours": 1,
+            "usage_types": ["assembly"],
+            "active": True,
+        },
+    )
+    assert part.status_code == 201
+    part_id = part.json()["id"]
+    employee_id = create_employee(
+        client, "同订单补班员工", "core", [part_id]
+    )
+    machine = client.post(
+        "/api/machines",
+        json={
+            "code": "LEAVE-MACHINE",
+            "name": "请假合并测试整机",
+            "active": True,
+            "bom_items": [
+                {"part_id": part_id, "quantity_per_machine": 1}
+            ],
+        },
+    )
+    assert machine.status_code == 201
+    order = client.post(
+        "/api/production-orders",
+        json={
+            "order_type": "machine",
+            "source_id": machine.json()["id"],
+            "quantity": 5,
+            "start_date": "2026-07-20",
+            "end_date": "2026-07-24",
+        },
+    )
+    assert order.status_code == 201
+    week_id = client.post(
+        "/api/production-orders/generate"
+    ).json()["affected_week_ids"][0]
+    original = client.get(f"/api/weeks/{week_id}").json()
+    assert [
+        sum(
+            assignment["quantity"]
+            for assignment in original["assignments"]
+            if assignment["work_date"] == day
+        )
+        for day in original["days"]
+    ] == [1, 1, 1, 1, 1, 0, 0]
+    assert client.post(f"/api/weeks/{week_id}/confirm").status_code == 200
+
+    adjusted = client.post(
+        f"/api/weeks/{week_id}/leave-adjustments",
+        json={
+            "employee_id": employee_id,
+            "leave_dates": ["2026-07-23"],
+            "use_overtime": True,
+            "use_weekend": True,
+        },
+    )
+
+    assert adjusted.status_code == 200
+    detail = adjusted.json()
+    assert detail["summary"]["remaining_hours"] == 0
+    assert sum(
+        assignment["quantity"]
+        for assignment in detail["assignments"]
+        if assignment["employee_id"] == employee_id
+    ) == 5
+    assert all(
+        assignment["work_date"] != "2026-07-23"
+        for assignment in detail["assignments"]
+        if assignment["employee_id"] == employee_id
+    )
+    assert max(
+        assignment["quantity"]
+        for assignment in detail["assignments"]
+        if assignment["employee_id"] == employee_id
+    ) == 2
+
+
 def test_data_maintenance_clears_cache_and_schedule_history_but_keeps_master_data(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ):

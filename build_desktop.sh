@@ -33,6 +33,11 @@ fi
   --specpath "build/desktop" \
   "$PWD/desktop_launcher.py"
 
+APP_PATH="$PWD/release/产线排班系统.app"
+plutil -replace CFBundleShortVersionString -string "3.2.1" "$APP_PATH/Contents/Info.plist"
+plutil -replace CFBundleVersion -string "3.2.1" "$APP_PATH/Contents/Info.plist"
+codesign --force --deep --sign - "$APP_PATH"
+
 echo ""
 echo "桌面程序已生成：release/产线排班系统.app"
 echo "可直接双击运行，无需再打开终端。"

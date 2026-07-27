@@ -159,7 +159,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="单产线整机与跨周排班系统", version="3.1.0", lifespan=lifespan)
+app = FastAPI(title="单产线整机与跨周排班系统", version="3.2.1", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -1965,6 +1965,10 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
                 (week_id, employee_id, part_id, work_date, quantity,
                  standard_hours_snapshot, order_item_id, source)
             VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')
+            ON CONFLICT (week_id, employee_id, order_item_id, work_date)
+            DO UPDATE SET
+                quantity = assignments.quantity + excluded.quantity,
+                source = 'manual'
             """,
             [
                 (
