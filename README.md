@@ -11,10 +11,12 @@ macOS 用户可以直接双击 `release/产线排班系统.app` 使用，不需�
 - macOS：`~/Library/Application Support/ProductionLineScheduler/scheduler.db`
 - Windows：`%APPDATA%\ProductionLineScheduler\scheduler.db`
 // windows 终端下载方法：
+```powershell
     Set-Location C:\ProductionLineScheduler  //根据文件名修改
     py -3.12 -m venv .desktop-venv
     npm.cmd --prefix .\frontend ci
     powershell -ExecutionPolicy Bypass -File .\build_desktop.ps1
+```
 如果桌面程序仍放在本项目的 `release` 目录中，首次运行时会自动复制原网页开发版数据库；原数据文件会保留不动。
 
 当前 macOS 安装包为本机生成的 Apple Silicon 版本。由于没有使用 Apple 开发者证书，若系统首次打开时拦截，请在访达中右键应用并选择“打开”。
