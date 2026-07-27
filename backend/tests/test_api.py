@@ -80,11 +80,16 @@ def test_defaults_and_capacity_formula(client: TestClient):
     week_id = create_week(client, part_id, 5)
     detail = client.post(f"/api/weeks/{week_id}/generate").json()
     assert detail["summary"]["shortage_threshold"] == 16.875
-    assert all(day["normal_capacity"] == 6.75 for day in detail["employees"][0]["days"])
+    employee_days = detail["employees"][0]["days"]
+    assert [day["normal_capacity"] for day in employee_days] == [
+        6.75, 6.75, 6.75, 6.75, 6.75, 0, 0
+    ]
     assert all(
         item["efficiency"] == pytest.approx(1 / 7.5, abs=0.0001)
         for item in detail["daily_efficiency"]
+        if item["available_hours"] > 0
     )
+    assert [item["available_hours"] for item in detail["daily_efficiency"][-2:]] == [0, 0]
 
 
 def test_settings_sync_unconfirmed_default_hours_but_preserve_manual_leave(
@@ -129,17 +134,17 @@ def test_settings_sync_unconfirmed_default_hours_but_preserve_manual_leave(
     assert saved.status_code == 200
 
     confirmed = client.get(f"/api/weeks/{confirmed_week_id}").json()
-    assert all(
-        day["availability_hours"] == 7.5
+    assert [
+        day["availability_hours"]
         for day in confirmed["employees"][0]["days"]
-    )
+    ] == [7.5, 7.5, 7.5, 7.5, 7.5, 0, 0]
 
     draft_detail = client.get(f"/api/weeks/{draft_week_id}").json()
     assert draft_detail["settings"]["daily_hours"] == 8.5
     assert [
         day["availability_hours"]
         for day in draft_detail["employees"][0]["days"]
-    ] == [8.5, 8.5, 0, 8.5, 8.5]
+    ] == [8.5, 8.5, 0, 8.5, 8.5, 0, 0]
 
 
 def test_custom_shortage_threshold_controls_reinforcement_suggestion(client: TestClient):
@@ -217,6 +222,11 @@ def test_reinforcement_only_receives_core_shortage_and_is_excluded_from_efficien
         and item["available_hours"] == 7.5
         and item["efficiency"] == 0.8
         for item in resolved["daily_efficiency"]
+        if item["available_hours"] > 0
+    )
+    assert all(
+        item["available_hours"] == 0
+        for item in resolved["daily_efficiency"][-2:]
     )
 
 
@@ -267,7 +277,7 @@ def test_small_shortage_can_be_assigned_to_selected_overtime(client: TestClient)
     ) > 0
 
 
-def test_employee_work_pattern_and_week_leave_control_availability(client: TestClient):
+def test_employee_defaults_to_weekdays_and_week_can_enable_any_day(client: TestClient):
     part_id = create_part(client, code="SHIFT", hours=1)
     employee = client.post(
         "/api/employees",
@@ -283,32 +293,42 @@ def test_employee_work_pattern_and_week_leave_control_availability(client: TestC
     )
     assert employee.status_code == 201
     employee_id = employee.json()["id"]
-    assert employee.json()["weekly_work_days"] == 3
+    # 旧客户端仍可发送长期班次字段，但服务端统一忽略并保存周一至周五。
+    assert employee.json()["weekly_work_days"] == 5
     assert employee.json()["unavailable_weekdays"] == [5, 6]
 
-    week_id = create_week(client, part_id, 6)
+    week_id = create_week(client, part_id, 30)
     generated = client.post(f"/api/weeks/{week_id}/generate").json()
     days = generated["employees"][0]["days"]
-    assert [day["availability_hours"] for day in days] == [7.5, 0, 7.5, 0, 7.5]
-    assert [day["assigned_hours"] for day in days] == [2, 0, 2, 0, 2]
+    assert [day["availability_hours"] for day in days] == [
+        7.5, 7.5, 7.5, 7.5, 7.5, 0, 0
+    ]
+    assert [day["assigned_hours"] for day in days] == [6, 6, 6, 6, 6, 0, 0]
 
-    leave = client.put(
+    changed_week = client.put(
         f"/api/weeks/{week_id}/availability",
         json={
             "entries": [
                 {
                     "employee_id": employee_id,
-                    "work_date": "2026-07-22",
+                    "work_date": "2026-07-21",
                     "hours": 0,
+                },
+                {
+                    "employee_id": employee_id,
+                    "work_date": "2026-07-25",
+                    "hours": 7.5,
                 }
             ]
         },
     )
-    assert leave.status_code == 200
+    assert changed_week.status_code == 200
     regenerated = client.post(f"/api/weeks/{week_id}/generate").json()
     days = regenerated["employees"][0]["days"]
-    assert [day["availability_hours"] for day in days] == [7.5, 0, 0, 0, 7.5]
-    assert [day["assigned_hours"] for day in days] == [3, 0, 0, 0, 3]
+    assert [day["availability_hours"] for day in days] == [
+        7.5, 0, 7.5, 7.5, 7.5, 7.5, 0
+    ]
+    assert [day["assigned_hours"] for day in days] == [6, 0, 6, 6, 6, 6, 0]
 
 
 def test_daily_overtime_is_fixed_block_or_zero_and_survives_regeneration(
@@ -469,7 +489,12 @@ def test_employee_custom_overtime_value_is_ignored_in_favor_of_fixed_block(
     )
     assert first.status_code == 200
     assert first.json()["summary"]["remaining_hours"] == 0
-    assert first.json()["employees"][0]["days"][-1]["approved_overtime_hours"] == 4
+    friday = next(
+        day
+        for day in first.json()["employees"][0]["days"]
+        if day["date"] == "2026-07-24"
+    )
+    assert friday["approved_overtime_hours"] == 4
 
     employee = client.get("/api/employees").json()[0]
     employee["overtime_limit"] = 1
@@ -478,7 +503,7 @@ def test_employee_custom_overtime_value_is_ignored_in_favor_of_fixed_block(
     assert updated.json()["overtime_limit"] is None
 
 
-def test_employee_work_days_cannot_exceed_allowed_weekdays(client: TestClient):
+def test_employee_long_term_work_day_fields_are_ignored(client: TestClient):
     response = client.post(
         "/api/employees",
         json={
@@ -490,8 +515,9 @@ def test_employee_work_days_cannot_exceed_allowed_weekdays(client: TestClient):
             "active": True,
         },
     )
-    assert response.status_code == 422
-    assert "每周工作天数不能超过" in response.text
+    assert response.status_code == 201
+    assert response.json()["weekly_work_days"] == 5
+    assert response.json()["unavailable_weekdays"] == [5, 6]
 
 
 def test_manual_assignment_validates_skill_and_approval(client: TestClient):
@@ -995,7 +1021,7 @@ def test_machine_bom_snapshot_and_balanced_cross_week_schedule(client: TestClien
         day: sum(item["quantity"] for item in detail["assignments"] if item["work_date"] == day)
         for day in detail["days"]
     }
-    assert by_day == {day: 2 for day in detail["days"]}
+    assert [by_day[day] for day in detail["days"]] == [2, 2, 2, 2, 2, 0, 0]
     assert {item["employee_id"] for item in detail["assignments"]} == {employee_id}
     assert all(item["order_type"] == "machine" for item in detail["assignments"])
     assert detail["demands"][0]["sources"][0]["production_order_id"] == order_id
@@ -1048,7 +1074,7 @@ def test_accessory_fills_earliest_capacity_and_confirmed_week_is_locked(client: 
     assert sum(item["quantity"] for item in first_week["assignments"]) == 30
     assert [
         day["assigned_hours"] for day in first_week["employees"][0]["days"]
-    ] == [6, 6, 6, 6, 6]
+    ] == [6, 6, 6, 6, 6, 0, 0]
     assert sum(item["quantity"] for item in second_week["assignments"]) == 5
     assert {item["work_date"] for item in second_week["assignments"]} == {"2026-07-27"}
 
@@ -1120,7 +1146,11 @@ def test_cross_week_reinforcement_only_takes_accessory_remainder(
     assert core_after == core_before
     assert sum(item["quantity"] for item in backup_assignments) == 5
     assert {item["work_date"] for item in backup_assignments} == {"2026-07-20"}
-    assert all(item["efficiency"] == 0.8 for item in resolved["daily_efficiency"])
+    assert all(
+        item["efficiency"] == 0.8
+        for item in resolved["daily_efficiency"]
+        if item["available_hours"] > 0
+    )
 
 
 def test_accessory_is_balanced_between_equally_loaded_skilled_employees(
@@ -1279,7 +1309,7 @@ def test_machine_remainder_is_spread_and_order_hour_snapshots_stay_exact(client:
         )
         for day in detail["days"]
     ]
-    assert by_day == [1, 2, 1, 2, 1]
+    assert by_day == [1, 2, 1, 2, 1, 0, 0]
 
     # 新任务读取修改后的主数据工时，旧任务继续保留建立时的1小时快照。
     client.put(
@@ -1380,7 +1410,7 @@ def test_machine_uses_employee1_before_employee2_and_keeps_daily_targets(
             if assignment["work_date"] == day
         )
         for day in detail["days"]
-    ] == [8, 8, 8, 8, 8]
+    ] == [8, 8, 8, 8, 8, 0, 0]
 
 
 def test_dual_usage_accessory_is_employee2_only_after_machine(client: TestClient):
@@ -1470,12 +1500,17 @@ def test_fixed_four_hour_overtime_uses_latest_dates_first(client: TestClient):
         json={"mode": "overtime", "employee_ids": [employee_id]},
     ).json()
     assert resolved["summary"]["remaining_hours"] == 0
-    friday = resolved["employees"][0]["days"][-1]
+    friday = next(
+        day
+        for day in resolved["employees"][0]["days"]
+        if day["date"] == "2026-07-24"
+    )
     assert friday["approved_overtime_hours"] == 4
     assert friday["assigned_hours"] == 9
     assert all(
         day["approved_overtime_hours"] == 0
-        for day in resolved["employees"][0]["days"][:-1]
+        for day in resolved["employees"][0]["days"]
+        if day["date"] != "2026-07-24"
     )
 
 
@@ -1518,7 +1553,9 @@ def test_confirmed_leave_adjustment_locks_unaffected_tasks_and_can_restore(
     first_part = create_part(client, code="LEAVE-A", hours=1)
     second_part = create_part(client, code="LEAVE-B", hours=1)
     first_employee = create_employee(client, "请假员工", "core", [first_part])
-    second_employee = create_employee(client, "不受影响员工", "core", [second_part])
+    second_employee = create_employee(
+        client, "不受影响员工", "core", [first_part, second_part]
+    )
     for part_id in (first_part, second_part):
         client.post(
             "/api/production-orders",
@@ -1543,26 +1580,44 @@ def test_confirmed_leave_adjustment_locks_unaffected_tasks_and_can_restore(
     adjusted = client.post(
         f"/api/weeks/{week_id}/leave-adjustments",
         json={
-            "entries": [
-                {
-                    "employee_id": first_employee,
-                    "work_date": "2026-07-20",
-                    "hours": 0,
-                }
-            ]
+            "employee_id": first_employee,
+            "leave_dates": ["2026-07-20"],
+            "use_overtime": True,
+            "use_weekend": True,
         },
     )
     assert adjusted.status_code == 200
     detail = adjusted.json()
     assert detail["active_adjustment"] is not None
-    assert detail["summary"]["remaining_hours"] == 2
+    assert detail["active_adjustment"]["employee_id"] == first_employee
+    assert detail["active_adjustment"]["leave_dates"] == ["2026-07-20"]
+    assert detail["summary"]["remaining_hours"] == 0
     locked = next(
         item
         for item in detail["assignments"]
-        if item["employee_id"] == second_employee
+        if item["id"] == unaffected["id"]
     )
     assert locked["id"] == unaffected["id"]
     assert locked["source"] == "manual"
+    recovered = [
+        item
+        for item in detail["assignments"]
+        if item["employee_id"] == first_employee
+    ]
+    assert recovered
+    assert all(item["work_date"] != "2026-07-20" for item in recovered)
+    # 即使其他员工现在也具备该零件技能，请假任务仍只交还本人补班。
+    assert sum(
+        item["quantity"]
+        for item in detail["assignments"]
+        if item["employee_id"] == second_employee
+        and item["part_id"] == first_part
+    ) == sum(
+        item["quantity"]
+        for item in original["assignments"]
+        if item["employee_id"] == second_employee
+        and item["part_id"] == first_part
+    )
 
     restored = client.post(
         f"/api/weeks/{week_id}/leave-adjustments/cancel"

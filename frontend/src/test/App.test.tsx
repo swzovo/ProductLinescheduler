@@ -246,16 +246,15 @@ describe("应用导航与容量展示", () => {
     expect(screen.getByText("选择 .xlsx 或 .csv 文件")).toBeInTheDocument();
   });
 
-  it("新增员工时可设置每周工作天数和固定休息日", async () => {
+  it("员工管理移除长期班次并提示在周排班逐周设置", async () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /员工管理/ }));
     fireEvent.click(await screen.findByRole("button", { name: /新增员工/ }));
 
-    expect(screen.getByText("每周工作天数")).toBeInTheDocument();
-    expect(screen.getByText("固定不能上班的星期")).toBeInTheDocument();
-    expect(screen.getByText(/临时请假请在周排班中/)).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "周六" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "周日" })).toBeChecked();
+    expect(screen.queryByText("每周工作天数")).not.toBeInTheDocument();
+    expect(screen.queryByText("固定不能上班的星期")).not.toBeInTheDocument();
+    expect(screen.getByText("出勤安排")).toBeInTheDocument();
+    expect(screen.getByText(/默认周一至周五.*周排班.*逐周调整/)).toBeInTheDocument();
     expect(screen.getByText("统一加班规则")).toBeInTheDocument();
     expect(screen.getByText(/不加班.*完整加班4小时/)).toBeInTheDocument();
     expect(screen.queryByText("个人每日加班时间来源")).not.toBeInTheDocument();
@@ -682,7 +681,7 @@ describe("应用导航与容量展示", () => {
     expect(screen.getByText("正常出勤")).toBeInTheDocument();
     expect(screen.getByText("固定加班班次")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("checkbox", { name: "2026-07-20 加班4小时" }));
-    fireEvent.click(screen.getByRole("button", { name: "保存出勤与加班" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存本周出勤与加班" }));
     await waitFor(() => expect(availabilityBody).toEqual(expect.objectContaining({
       overtime_entries: [{
         employee_id: 1,

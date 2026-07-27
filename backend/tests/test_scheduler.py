@@ -2,17 +2,18 @@ from backend.app.scheduler import Demand, Worker, active_dates, solve_schedule
 
 
 def test_active_dates_include_weekend():
-    assert active_dates("2026-07-20", False) == [
+    expected = [
         "2026-07-20",
         "2026-07-21",
         "2026-07-22",
         "2026-07-23",
         "2026-07-24",
-    ]
-    assert active_dates("2026-07-20", True)[-2:] == [
         "2026-07-25",
         "2026-07-26",
     ]
+    # 周排班始终展示周一至周日，是否上班由逐人逐日可用工时决定。
+    assert active_dates("2026-07-20", False) == expected
+    assert active_dates("2026-07-20", True) == expected
 
 
 def test_solver_obeys_skill_and_integer_capacity():
