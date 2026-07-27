@@ -308,6 +308,12 @@ export function EmployeesPage() {
               </select>
             </label>
             <div className="form-note-card">
+              <strong>出勤安排</strong>
+              <span>
+                新员工默认周一至周五上班；具体上班天数和星期请在周排班的员工编辑中逐周调整。
+              </span>
+            </div>
+            <div className="form-note-card">
               <strong>统一加班规则</strong>
               <span>
                 员工每天只能选择“不加班”或完整加班

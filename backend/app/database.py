@@ -698,6 +698,22 @@ def init_db() -> None:
             SET weekly_work_days = 5, unavailable_weekdays = '[5, 6]'
             """
         )
+        # 员工资料不再保存长期工作日规则。未确认周中尚未被管理员逐周
+        # 修改的出勤记录，统一恢复为周一至周五；is_manual=1 的逐周设置保留。
+        connection.execute(
+            """
+            UPDATE daily_availability
+            SET hours = CASE
+                WHEN CAST(strftime('%w', work_date) AS INTEGER) IN (0, 6)
+                    THEN 0
+                ELSE (SELECT daily_hours FROM settings WHERE id = 1)
+            END
+            WHERE is_manual = 0
+              AND week_id IN (
+                  SELECT id FROM week_plans WHERE status != 'confirmed'
+              )
+            """
+        )
         connection.execute(
             """
             DELETE FROM overtime_approvals

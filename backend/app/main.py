@@ -1776,19 +1776,6 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
                 "UPDATE week_plans SET include_weekend = 1 WHERE id = ?",
                 (week_id,),
             )
-            connection.executemany(
-                """
-                INSERT INTO daily_availability
-                    (week_id, employee_id, work_date, hours, is_manual)
-                VALUES (?, ?, ?, ?, 1)
-                ON CONFLICT (week_id, employee_id, work_date)
-                DO UPDATE SET hours = excluded.hours, is_manual = 1
-                """,
-                [
-                    (week_id, leave_employee_id, day, settings["daily_hours"])
-                    for day in sorted(weekend_days - leave_days)
-                ],
-            )
 
         refreshed_week = week_row(connection, week_id)
         employees = selected_employees(connection, week_id)
@@ -1839,13 +1826,26 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
             )
             for day in all_days
             if day not in leave_days
+            and (
+                date.fromisoformat(day).weekday() < 5
+                or payload.use_weekend
+            )
         }
+        unopened_weekend_days = [
+            day
+            for day in sorted(weekend_days - leave_days, reverse=True)
+            if availability[(leave_employee_id, day)] <= 0
+        ] if payload.use_weekend else []
         overtime_days = [
             day
             for day in sorted(all_days, reverse=True)
             if day not in leave_days
             and availability[(leave_employee_id, day)] > 0
             and day not in approved
+            and (
+                date.fromisoformat(day).weekday() < 5
+                or payload.use_weekend
+            )
         ]
         grouped_released: dict[tuple[int, int | None, float], int] = defaultdict(int)
         for row in released_rows:
@@ -1869,8 +1869,62 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
                     for day, capacity in residual.items()
                     if capacity >= unit_minutes
                 ]
-                while not candidates and payload.use_overtime and overtime_days:
-                    overtime_day = overtime_days.pop(0)
+                while not candidates and unopened_weekend_days:
+                    weekend_day = unopened_weekend_days.pop(0)
+                    connection.execute(
+                        """
+                        INSERT INTO daily_availability
+                            (week_id, employee_id, work_date, hours, is_manual)
+                        VALUES (?, ?, ?, ?, 1)
+                        ON CONFLICT (week_id, employee_id, work_date)
+                        DO UPDATE SET hours = excluded.hours, is_manual = 1
+                        """,
+                        (
+                            week_id,
+                            leave_employee_id,
+                            weekend_day,
+                            settings["daily_hours"],
+                        ),
+                    )
+                    availability[(leave_employee_id, weekend_day)] = float(
+                        settings["daily_hours"]
+                    )
+                    residual[weekend_day] = max(
+                        0,
+                        int(
+                            round(
+                                float(settings["daily_hours"])
+                                * efficiency
+                                * 60
+                            )
+                        )
+                        - existing_load.get(weekend_day, 0),
+                    )
+                    if weekend_day not in approved:
+                        overtime_days.append(weekend_day)
+                        overtime_days.sort(reverse=True)
+                    candidates = [
+                        day
+                        for day, capacity in residual.items()
+                        if capacity >= unit_minutes
+                    ]
+                if not candidates and payload.use_overtime:
+                    overtime_capacity = int(
+                        round(block_hours * efficiency * 60)
+                    )
+                    viable_overtime_days = [
+                        day
+                        for day in overtime_days
+                        if residual.get(day, 0) + overtime_capacity >= unit_minutes
+                    ]
+                    if viable_overtime_days:
+                        overtime_day = viable_overtime_days[0]
+                        overtime_days.remove(overtime_day)
+                    else:
+                        overtime_day = None
+                else:
+                    overtime_day = None
+                if overtime_day is not None:
                     connection.execute(
                         """
                         INSERT INTO overtime_approvals

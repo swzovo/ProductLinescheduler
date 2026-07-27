@@ -214,12 +214,6 @@ class EmployeeCreate(BaseModel):
             raise ValueError("不可上班星期必须是周一至周日且不能重复")
         return sorted(value)
 
-    @model_validator(mode="after")
-    def validate_working_day_count(self):
-        if self.weekly_work_days > 7 - len(self.unavailable_weekdays):
-            raise ValueError("每周工作天数不能超过可上班星期的数量")
-        return self
-
 
 class EmployeeUpdate(EmployeeCreate):
     pass
