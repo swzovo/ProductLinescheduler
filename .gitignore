@@ -1,0 +1,16 @@
+.DS_Store
+.idea/
+.venv/
+.desktop-venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.tsbuildinfo
+backend/data/*.db
+backend/data/*.db-*
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+build/
+release/
+*.spec
