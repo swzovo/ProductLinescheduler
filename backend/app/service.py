@@ -792,6 +792,24 @@ def calculate_week(connection: sqlite3.Connection, week_id: int) -> dict[str, An
             suggestion = "reinforcement"
         else:
             suggestion = "no_skill"
+    adjustment_data = None
+    adjustment = connection.execute(
+        """
+        SELECT id, status, created_at, snapshot_json
+        FROM week_adjustments
+        WHERE week_id = ? AND status = 'active'
+        """,
+        (week_id,),
+    ).fetchone()
+    if adjustment is not None:
+        adjustment_data = {
+            "id": int(adjustment["id"]),
+            "status": adjustment["status"],
+            "created_at": adjustment["created_at"],
+            **json.loads(adjustment["snapshot_json"]).get(
+                "adjustment_policy", {}
+            ),
+        }
 
     return {
         "id": int(week["id"]),
@@ -799,20 +817,7 @@ def calculate_week(connection: sqlite3.Connection, week_id: int) -> dict[str, An
         "include_weekend": bool(week["include_weekend"]),
         "status": week["status"],
         "confirmed_at": week["confirmed_at"],
-        "active_adjustment": (
-            row_dict(adjustment)
-            if (
-                adjustment := connection.execute(
-                    """
-                    SELECT id, status, created_at
-                    FROM week_adjustments
-                    WHERE week_id = ? AND status = 'active'
-                    """,
-                    (week_id,),
-                ).fetchone()
-            )
-            else None
-        ),
+        "active_adjustment": adjustment_data,
         "settings": settings,
         "days": days,
         "demands": demand_items,

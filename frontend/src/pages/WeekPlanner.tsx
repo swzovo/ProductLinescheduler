@@ -60,9 +60,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
   const [newWeekOpen, setNewWeekOpen] = useState(false);
   const [newWeekDate, setNewWeekDate] = useState(nextMonday());
   const [demandOpen, setDemandOpen] = useState(false);
-  const [calendarOpen, setCalendarOpen] = useState(false);
   const [demandValues, setDemandValues] = useState<Record<number, number>>({});
-  const [includeWeekend, setIncludeWeekend] = useState(false);
   const [shortageOpen, setShortageOpen] = useState(false);
   const [resolutionMode, setResolutionMode] = useState<"reinforcement" | "overtime">("overtime");
   const [selectedCandidates, setSelectedCandidates] = useState<number[]>([]);
@@ -76,7 +74,10 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
   });
   const [availabilityEmployee, setAvailabilityEmployee] = useState<WeekEmployee | null>(null);
   const [leavePickerOpen, setLeavePickerOpen] = useState(false);
-  const [leaveAdjustmentMode, setLeaveAdjustmentMode] = useState(false);
+  const [leaveEmployee, setLeaveEmployee] = useState<WeekEmployee | null>(null);
+  const [leaveDates, setLeaveDates] = useState<string[]>([]);
+  const [leaveUseOvertime, setLeaveUseOvertime] = useState(true);
+  const [leaveUseWeekend, setLeaveUseWeekend] = useState(true);
   const [availabilityValues, setAvailabilityValues] = useState<Record<string, number>>({});
   const [overtimeManualValues, setOvertimeManualValues] = useState<Record<string, boolean>>({});
   const [exportBusy, setExportBusy] = useState<"pdf" | "png" | null>(null);
@@ -143,7 +144,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
         method: "POST",
         body: JSON.stringify({
           week_start: newWeekDate,
-          include_weekend: false,
+          include_weekend: true,
           demands: [],
         }),
       });
@@ -151,7 +152,6 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
       setWeek(result);
       setNewWeekOpen(false);
       setDemandValues({});
-      setIncludeWeekend(false);
       await loadLists(result.id);
       setMessage({ text: "周计划已创建，请在生产需求中录入整机计划或附件订单" });
     } catch (error) {
@@ -166,7 +166,6 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
     setDemandValues(
       Object.fromEntries(week.demands.map((item) => [item.part_id, item.quantity])),
     );
-    setIncludeWeekend(week.include_weekend);
     setDemandOpen(true);
   };
 
@@ -178,7 +177,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
       const result = await api<WeekDetail>(`/weeks/${week.id}`, {
         method: "PUT",
         body: JSON.stringify({
-          include_weekend: includeWeekend,
+          include_weekend: true,
           demands: Object.entries(demandValues)
             .filter(([, quantity]) => Number(quantity) > 0)
             .map(([partId, quantity]) => ({
@@ -191,26 +190,6 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
       setDemandOpen(false);
       await refresh();
       setMessage({ text: "本周生产需求已保存，原排班草案已清空" });
-    } catch (error) {
-      setMessage({ text: (error as Error).message, error: true });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const saveCalendar = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!week) return;
-    setBusy(true);
-    try {
-      const result = await api<WeekDetail>(`/weeks/${week.id}/calendar`, {
-        method: "PUT",
-        body: JSON.stringify({ include_weekend: includeWeekend }),
-      });
-      setWeek(result);
-      setCalendarOpen(false);
-      await refresh();
-      setMessage({ text: "本周工作日设置已保存，相关未确认排班已重新计算" });
     } catch (error) {
       setMessage({ text: (error as Error).message, error: true });
     } finally {
@@ -359,7 +338,6 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
   };
 
   const openAvailability = (employee: WeekEmployee) => {
-    setLeaveAdjustmentMode(false);
     setAvailabilityEmployee(employee);
     setAvailabilityValues(
       Object.fromEntries(employee.days.map((day) => [day.date, day.availability_hours])),
@@ -371,14 +349,10 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
 
   const openLeaveAdjustment = (employee: WeekEmployee) => {
     setLeavePickerOpen(false);
-    setLeaveAdjustmentMode(true);
-    setAvailabilityEmployee(employee);
-    setAvailabilityValues(
-      Object.fromEntries(employee.days.map((day) => [day.date, day.availability_hours])),
-    );
-    setOvertimeManualValues(
-      Object.fromEntries(employee.days.map((day) => [day.date, day.approved_overtime_hours > 0])),
-    );
+    setLeaveEmployee(employee);
+    setLeaveDates([]);
+    setLeaveUseOvertime(true);
+    setLeaveUseWeekend(true);
   };
 
   const saveAvailability = async (event: FormEvent) => {
@@ -386,60 +360,66 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
     if (!week || !availabilityEmployee) return;
     setBusy(true);
     try {
-      const original = Object.fromEntries(
-        availabilityEmployee.days.map((day) => [day.date, day.availability_hours]),
-      );
-      const changedEntries = week.days
-        .filter((day) => (availabilityValues[day] ?? 0) !== original[day])
-        .map((day) => ({
-            employee_id: availabilityEmployee.id,
-            work_date: day,
-            hours: availabilityValues[day] ?? 0,
-        }));
-      if (leaveAdjustmentMode && changedEntries.length === 0) {
-        throw new Error("请至少修改一个日期的出勤工时");
-      }
       const result = await api<WeekDetail>(
-        leaveAdjustmentMode
-          ? `/weeks/${week.id}/leave-adjustments`
-          : `/weeks/${week.id}/availability`,
+        `/weeks/${week.id}/availability`,
         {
-          method: leaveAdjustmentMode ? "POST" : "PUT",
-          body: JSON.stringify(
-            leaveAdjustmentMode
-              ? {
-                  entries: changedEntries,
-                  overtime_entries: week.days.map((day) => ({
-                    employee_id: availabilityEmployee.id,
-                    work_date: day,
-                    hours: overtimeManualValues[day] ? overtimeBlockHours : 0,
-                    manual: overtimeManualValues[day] ?? false,
-                  })),
-                }
-              : {
-                  entries: week.days.map((day) => ({
-                    employee_id: availabilityEmployee.id,
-                    work_date: day,
-                    hours: availabilityValues[day] ?? 0,
-                  })),
-                  overtime_entries: week.days.map((day) => ({
-                    employee_id: availabilityEmployee.id,
-                    work_date: day,
-                    hours: overtimeManualValues[day] ? overtimeBlockHours : 0,
-                    manual: overtimeManualValues[day] ?? false,
-                  })),
-                },
-          ),
+          method: "PUT",
+          body: JSON.stringify({
+            entries: week.days.map((day) => ({
+              employee_id: availabilityEmployee.id,
+              work_date: day,
+              hours: availabilityValues[day] ?? 0,
+            })),
+            overtime_entries: week.days.map((day) => ({
+              employee_id: availabilityEmployee.id,
+              work_date: day,
+              hours: overtimeManualValues[day] ? overtimeBlockHours : 0,
+              manual: overtimeManualValues[day] ?? false,
+            })),
+          }),
         },
       );
       setWeek(result);
       setAvailabilityEmployee(null);
-      setLeaveAdjustmentMode(false);
+      await refresh();
+      setMessage({ text: "本周逐日出勤与加班设置已保存，请重新生成排班" });
+    } catch (error) {
+      setMessage({ text: (error as Error).message, error: true });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createLeaveAdjustment = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!week || !leaveEmployee) return;
+    if (leaveDates.length === 0) {
+      setMessage({ text: "请至少选择一个有任务的请假日期", error: true });
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await api<WeekDetail>(
+        `/weeks/${week.id}/leave-adjustments`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            employee_id: leaveEmployee.id,
+            leave_dates: leaveDates,
+            use_overtime: leaveUseOvertime,
+            use_weekend: leaveUseWeekend,
+          }),
+        },
+      );
+      setWeek(result);
+      setLeaveEmployee(null);
       await refresh();
       setMessage({
-        text: leaveAdjustmentMode
-          ? `已进入请假调整，只重新安排受影响任务；加班统一为${overtimeBlockHours}小时固定班次`
-          : "每日出勤与加班设置已保存，请重新生成排班",
+        text:
+          result.summary.remaining_hours > 0
+            ? "请假已登记，但本人本周补班容量仍不足；可取消后调整补班方式"
+            : "请假已登记，原任务已全部安排给该员工本人补做",
+        error: result.summary.remaining_hours > 0,
       });
     } catch (error) {
       setMessage({ text: (error as Error).message, error: true });
@@ -668,20 +648,13 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
                 管理生产需求
               </button>
               <button
-                className="secondary-button"
-                disabled={week.status === "confirmed"}
-                onClick={() => { setIncludeWeekend(week.include_weekend); setCalendarOpen(true); }}
-              >
-                本周工作日
-              </button>
-              <button
                 className="primary-button"
                 onClick={() => void generate()}
-                disabled={busy || week.status === "confirmed" || week.demands.length === 0}
+                disabled={busy || week.status === "confirmed" || Boolean(week.active_adjustment) || week.demands.length === 0}
               >
                 {busy ? "计算中…" : "重新计算相关周排班"}
               </button>
-              {week.summary.remaining_hours > 0 && (
+              {week.summary.remaining_hours > 0 && !week.active_adjustment && (
                 <button className="warning-button" onClick={() => {
                   setResolutionMode(week.shortage.suggestion === "reinforcement" ? "reinforcement" : "overtime");
                   setSelectedCandidates([]);
@@ -752,7 +725,10 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
           {week.active_adjustment && (
             <section className="confirmed-conflict adjustment-banner">
               <span>
-                正在进行请假调整：无关任务已锁定，只会重排被释放的任务。处理完缺口后请重新确认本周。
+                正在处理
+                {week.employees.find((employee) => employee.id === week.active_adjustment?.employee_id)?.name ?? "该员工"}
+                的请假（{week.active_adjustment.leave_dates?.map(shortDate).join("、")}）：
+                原任务只允许本人通过其他工作日、固定加班或周末补班完成。
               </span>
               <button
                 type="button"
@@ -777,20 +753,23 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
               <div className="warning-symbol">!</div>
               <div>
                 <strong>
-                  {week.shortage.suggestion === "reinforcement"
+                  {week.active_adjustment
+                    ? "请假员工本人的补班容量仍然不足"
+                    : week.shortage.suggestion === "reinforcement"
                     ? "建议安排候补人员增援"
                     : week.shortage.suggestion === "overtime"
                       ? "建议由合格员工加班完成"
                       : "当前人员与技能无法覆盖全部任务"}
                 </strong>
                 <p>
-                  剩余 {week.summary.remaining_hours.toFixed(2)} 标准工时；半周判断阈值为{" "}
-                  {week.summary.shortage_threshold.toFixed(3)} 小时。
+                  剩余 {week.summary.remaining_hours.toFixed(2)} 标准工时。
+                  {!week.active_adjustment && ` 半周判断阈值为 ${week.summary.shortage_threshold.toFixed(3)} 小时。`}
+                  {week.active_adjustment && " 系统不会把这些任务转派给其他员工；可取消本次调整后重新选择补班方式。"}
                   {week.shortage.missing_skill_parts.length > 0 &&
                     ` 未覆盖零件：${week.shortage.missing_skill_parts.map((item) => `${item.part_code} · ${item.part_name}`).join("、")}。`}
                 </p>
               </div>
-              <button onClick={() => setShortageOpen(true)}>查看人选</button>
+              {!week.active_adjustment && <button onClick={() => setShortageOpen(true)}>查看人选</button>}
             </section>
           )}
 
@@ -798,7 +777,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
             <div className="panel-header">
               <div>
                 <h3>周排班明细</h3>
-                <p>整机零件优先均分，附件订单从最早空闲日期填充；点击员工姓名可登记本周请假。</p>
+                <p>周一至周日均可逐人设置；默认周一至周五出勤，点击员工姓名调整本周具体日期。</p>
               </div>
               <div className="view-switch">
                 <button className={view === "employee" ? "active" : ""} onClick={() => setView("employee")}>按员工</button>
@@ -824,7 +803,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
                         employee={employee}
                         week={week}
                         assignmentsByDay={assignmentsByDay}
-                        editable={week.status !== "confirmed"}
+                        editable={week.status !== "confirmed" && !week.active_adjustment}
                         onEmployee={() => openAvailability(employee)}
                         onAssignment={openAssignment}
                         onDelete={deleteAssignment}
@@ -866,7 +845,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
                 </table>
               </div>
             )}
-            {week.status !== "confirmed" && week.employees.length > 0 && week.demands.length > 0 && (
+            {week.status !== "confirmed" && !week.active_adjustment && week.employees.length > 0 && week.demands.length > 0 && (
               <div className="panel-footer">
                 <button className="secondary-button" onClick={() => openAssignment()}>＋ 手工添加任务</button>
               </div>
@@ -916,27 +895,10 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
                 <div className="field-note">没有被启用员工技能覆盖的零件，请先在员工管理中配置可制作零件。</div>
               )}
             </div>
-            <label className="weekend-toggle">
-              <input type="checkbox" checked={includeWeekend} onChange={(event) => setIncludeWeekend(event.target.checked)} />
-              <span><b>本周启用周末排班</b><small>勾选后周六、周日也会显示在排班表中</small></span>
-            </label>
             <div className="form-actions">
               <button type="button" className="ghost-button" onClick={() => setDemandOpen(false)}>取消</button>
               <button className="primary-button" disabled={busy} type="submit">保存生产需求</button>
             </div>
-          </form>
-        </Modal>
-      )}
-
-      {calendarOpen && week && (
-        <Modal title="设置本周工作日" onClose={() => setCalendarOpen(false)}>
-          <form onSubmit={saveCalendar}>
-            <label className="weekend-toggle">
-              <input type="checkbox" checked={includeWeekend} onChange={(event) => setIncludeWeekend(event.target.checked)} />
-              <span><b>启用周六、周日排班</b><small>关闭时本周只使用周一至周五；员工个人固定休息日仍然生效。</small></span>
-            </label>
-            <p className="field-note">保存后会保留已确认周和人工调整，只重新计算相关的未确认自动排班。</p>
-            <div className="form-actions"><button type="button" className="ghost-button" onClick={() => setCalendarOpen(false)}>取消</button><button className="primary-button" disabled={busy} type="submit">保存工作日设置</button></div>
           </form>
         </Modal>
       )}
@@ -1068,15 +1030,84 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
             ))}
           </div>
           <p className="field-note">
-            下一步把请假日期的正常出勤改为0或实际可出勤小时。系统会保存原确认版本并锁定其他任务。
+            选择员工后直接点击有任务的请假日期；系统会保存原确认版本，并且只让该员工本人补做原任务。
           </p>
         </Modal>
       )}
 
+      {leaveEmployee && week && (
+        <Modal
+          title={`请假调整 · ${leaveEmployee.name}`}
+          width="760px"
+          onClose={() => setLeaveEmployee(null)}
+        >
+          <form onSubmit={createLeaveAdjustment}>
+            <div className="leave-date-picker">
+              {leaveEmployee.days.map((day) => {
+                const hasTask = day.assigned_hours > 0;
+                const selected = leaveDates.includes(day.date);
+                return (
+                  <button
+                    key={day.date}
+                    type="button"
+                    disabled={!hasTask}
+                    className={selected ? "selected" : ""}
+                    onClick={() =>
+                      setLeaveDates(
+                        selected
+                          ? leaveDates.filter((item) => item !== day.date)
+                          : [...leaveDates, day.date].sort(),
+                      )
+                    }
+                  >
+                    <b>{weekday(day.date)}</b>
+                    <span>{shortDate(day.date)}</span>
+                    <small>{hasTask ? `${day.assigned_hours.toFixed(2)}h任务` : "无任务"}</small>
+                    <em>{selected ? "已选请假" : "点击请假"}</em>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="leave-recovery-options">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={leaveUseOvertime}
+                  onChange={(event) => setLeaveUseOvertime(event.target.checked)}
+                />
+                <span>
+                  <b>允许本人固定加班</b>
+                  <small>需要时按每次{overtimeBlockHours}小时，从本周后面的日期向前安排。</small>
+                </span>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={leaveUseWeekend}
+                  onChange={(event) => setLeaveUseWeekend(event.target.checked)}
+                />
+                <span>
+                  <b>允许本人周末补班</b>
+                  <small>周六、周日按系统每日理论工时开放，只用于本人补做。</small>
+                </span>
+              </label>
+            </div>
+            <p className="field-note">
+              系统会先使用该员工本人其他日期的空余时间，再使用你允许的加班或周末；不会转派给其他员工。
+            </p>
+            <div className="form-actions">
+              <button type="button" className="ghost-button" onClick={() => setLeaveEmployee(null)}>取消</button>
+              <button type="submit" className="primary-button" disabled={busy || leaveDates.length === 0}>
+                确定请假并由本人补班
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
       {availabilityEmployee && week && (
-        <Modal title={leaveAdjustmentMode ? `请假调整 · ${availabilityEmployee.name}` : `设置 ${availabilityEmployee.name} 的本周出勤与加班`} width="760px" onClose={() => {
+        <Modal title={`设置 ${availabilityEmployee.name} 的本周出勤与加班`} width="760px" onClose={() => {
           setAvailabilityEmployee(null);
-          setLeaveAdjustmentMode(false);
         }}>
           <form onSubmit={saveAvailability}>
             <div className="availability-editor">
@@ -1114,17 +1145,14 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
               ))}
             </div>
             <p className="field-note">
-              {leaveAdjustmentMode
-                ? `请把请假日期的正常出勤填0或实际可出勤小时；请假前后可直接勾选${overtimeBlockHours}小时固定加班班次。`
-                : `请假日期的正常出勤填0；加班只能勾选完整的${overtimeBlockHours}小时班次，取消勾选即不加班。`}
+              这里仅调整当前周：周一至周日可分别填写出勤时间；加班只能勾选完整的{overtimeBlockHours}小时班次。
             </p>
             <div className="form-actions">
               <button type="button" className="ghost-button" onClick={() => {
                 setAvailabilityEmployee(null);
-                setLeaveAdjustmentMode(false);
               }}>取消</button>
               <button className="primary-button" disabled={busy} type="submit">
-                {leaveAdjustmentMode ? "创建请假调整" : "保存出勤与加班"}
+                保存本周出勤与加班
               </button>
             </div>
           </form>

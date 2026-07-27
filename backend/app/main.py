@@ -5,7 +5,9 @@ import os
 import shutil
 import sqlite3
 import sys
+from collections import defaultdict
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -50,6 +52,7 @@ from .production import (
 )
 from .service import (
     approve_required_overtime,
+    availability_map,
     calculate_week,
     confirm_week,
     current_settings,
@@ -1006,6 +1009,13 @@ def permanently_delete_production_order(order_id: int):
 @app.post("/api/production-orders/generate")
 def generate_production_orders():
     with transaction() as connection:
+        if connection.execute(
+            "SELECT 1 FROM week_adjustments WHERE status = 'active' LIMIT 1"
+        ).fetchone():
+            raise HTTPException(
+                status_code=409,
+                detail="存在进行中的请假调整，请先重新确认或取消调整",
+            )
         return generate_cross_week(connection)
 
 
@@ -1491,6 +1501,17 @@ def update_week_calendar(week_id: int, payload: WeekCalendarUpdate):
 def generate_week(week_id: int):
     with transaction() as connection:
         if connection.execute(
+            """
+            SELECT 1 FROM week_adjustments
+            WHERE week_id = ? AND status = 'active'
+            """,
+            (week_id,),
+        ).fetchone():
+            raise HTTPException(
+                status_code=409,
+                detail="请假调整期间只保留原员工本人补班，不能重新自动分配",
+            )
+        if connection.execute(
             "SELECT 1 FROM production_orders WHERE status = 'active' LIMIT 1"
         ).fetchone():
             generate_cross_week(connection)
@@ -1504,6 +1525,17 @@ def resolve_shortage(week_id: int, payload: ResolveShortage):
     with transaction() as connection:
         week = week_row(connection, week_id)
         ensure_editable(week)
+        if connection.execute(
+            """
+            SELECT 1 FROM week_adjustments
+            WHERE week_id = ? AND status = 'active'
+            """,
+            (week_id,),
+        ).fetchone():
+            raise HTTPException(
+                status_code=409,
+                detail="请假调整任务已锁定给原员工，不能选择其他人员",
+            )
         placeholders = ",".join("?" for _ in payload.employee_ids)
         employees = connection.execute(
             f"SELECT * FROM employees WHERE id IN ({placeholders}) AND active = 1",
@@ -1553,6 +1585,17 @@ def resolve_shortage(week_id: int, payload: ResolveShortage):
 @app.put("/api/weeks/{week_id}/assignments")
 def update_assignments(week_id: int, payload: AssignmentsUpdate):
     with transaction() as connection:
+        if connection.execute(
+            """
+            SELECT 1 FROM week_adjustments
+            WHERE week_id = ? AND status = 'active'
+            """,
+            (week_id,),
+        ).fetchone():
+            raise HTTPException(
+                status_code=409,
+                detail="请假调整期间不能手工转派任务，任务必须由原员工完成",
+            )
         replace_assignments(
             connection,
             week_id,
@@ -1599,6 +1642,7 @@ def _week_adjustment_snapshot(
         "week": {
             "status": week["status"],
             "confirmed_at": week["confirmed_at"],
+            "include_weekend": bool(week["include_weekend"]),
         },
         "assignments": [
             row_dict(row)
@@ -1645,47 +1689,45 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
             (week_id,),
         ).fetchone():
             raise HTTPException(status_code=409, detail="本周已有进行中的请假调整")
-        valid_days = set(
-            active_dates(week["week_start"], bool(week["include_weekend"]))
-        )
+        valid_days = set(active_dates(week["week_start"], True))
         selected_ids = {
             int(employee["id"])
             for employee in selected_employees(connection, week_id)
         }
-        keys: set[tuple[int, str]] = set()
-        for item in payload.entries:
-            day = item.work_date.isoformat()
-            key = (item.employee_id, day)
-            if key in keys:
-                raise HTTPException(status_code=422, detail="请假调整中存在重复员工日期")
-            keys.add(key)
-            if day not in valid_days:
-                raise HTTPException(status_code=422, detail="请假日期不属于本周工作日")
-            if item.employee_id not in selected_ids:
-                raise HTTPException(status_code=422, detail="请假员工不在本周排班中")
-        overtime_keys: set[tuple[int, str]] = set()
-        block_hours = float(
-            settings_from_snapshot(week["settings_snapshot"]).get(
-                "overtime_block_hours", 4.0
-            )
-        )
-        for item in payload.overtime_entries:
-            day = item.work_date.isoformat()
-            key = (item.employee_id, day)
-            if key in overtime_keys:
-                raise HTTPException(status_code=422, detail="请假调整中存在重复加班日期")
-            overtime_keys.add(key)
-            if day not in valid_days:
-                raise HTTPException(status_code=422, detail="加班日期不属于本周工作日")
-            if item.employee_id not in selected_ids:
-                raise HTTPException(status_code=422, detail="加班员工不在本周排班中")
-            if item.manual and abs(float(item.hours) - block_hours) > 0.001:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"加班只能选择0小时或完整的{block_hours:g}小时固定班次",
-                )
+        if payload.employee_id is not None:
+            leave_employee_id = payload.employee_id
+            leave_days = {item.isoformat() for item in payload.leave_dates}
+        else:
+            legacy_employee_ids = {item.employee_id for item in payload.entries}
+            if len(legacy_employee_ids) != 1:
+                raise HTTPException(status_code=422, detail="一次请假调整只能选择一名员工")
+            leave_employee_id = legacy_employee_ids.pop()
+            leave_days = {item.work_date.isoformat() for item in payload.entries}
+        if leave_employee_id not in selected_ids:
+            raise HTTPException(status_code=422, detail="请假员工不在本周排班中")
+        if not leave_days or not leave_days.issubset(valid_days):
+            raise HTTPException(status_code=422, detail="请假日期不属于本周")
+
+        released_rows = connection.execute(
+            f"""
+            SELECT * FROM assignments
+            WHERE week_id = ? AND employee_id = ?
+              AND work_date IN ({','.join('?' for _ in leave_days)})
+            ORDER BY work_date, id
+            """,
+            (week_id, leave_employee_id, *sorted(leave_days)),
+        ).fetchall()
+        if not released_rows:
+            raise HTTPException(status_code=422, detail="所选日期没有该员工的排班任务")
 
         snapshot = _week_adjustment_snapshot(connection, week_id)
+        snapshot["adjustment_policy"] = {
+            "employee_id": leave_employee_id,
+            "leave_dates": sorted(leave_days),
+            "use_overtime": payload.use_overtime,
+            "use_weekend": payload.use_weekend,
+            "released_quantity": sum(int(row["quantity"]) for row in released_rows),
+        }
         cursor = connection.execute(
             """
             INSERT INTO week_adjustments (week_id, snapshot_json)
@@ -1698,14 +1740,13 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
             "UPDATE assignments SET source = 'manual' WHERE week_id = ?",
             (week_id,),
         )
-        for item in payload.entries:
-            day = item.work_date.isoformat()
+        for day in sorted(leave_days):
             connection.execute(
                 """
                 DELETE FROM assignments
                 WHERE week_id = ? AND employee_id = ? AND work_date = ?
                 """,
-                (week_id, item.employee_id, day),
+                (week_id, leave_employee_id, day),
             )
             connection.execute(
                 """
@@ -1715,36 +1756,181 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
                 ON CONFLICT (week_id, employee_id, work_date)
                 DO UPDATE SET hours = excluded.hours, is_manual = 1
                 """,
-                (week_id, item.employee_id, day, item.hours),
+                (week_id, leave_employee_id, day, 0),
             )
             connection.execute(
                 """
                 DELETE FROM overtime_approvals
                 WHERE week_id = ? AND employee_id = ? AND work_date = ?
                 """,
-                (week_id, item.employee_id, day),
+                (week_id, leave_employee_id, day),
             )
-        for item in payload.overtime_entries:
-            key = (week_id, item.employee_id, item.work_date.isoformat())
-            if item.manual:
-                connection.execute(
-                    """
-                    INSERT INTO overtime_approvals
-                        (week_id, employee_id, work_date, hours, is_manual)
-                    VALUES (?, ?, ?, ?, 1)
-                    ON CONFLICT (week_id, employee_id, work_date)
-                    DO UPDATE SET hours = excluded.hours, is_manual = 1
-                    """,
-                    (*key, block_hours),
+
+        settings = settings_from_snapshot(week["settings_snapshot"])
+        all_days = active_dates(week["week_start"], True)
+        weekend_days = {
+            day for day in all_days if date.fromisoformat(day).weekday() >= 5
+        }
+        if payload.use_weekend:
+            connection.execute(
+                "UPDATE week_plans SET include_weekend = 1 WHERE id = ?",
+                (week_id,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO daily_availability
+                    (week_id, employee_id, work_date, hours, is_manual)
+                VALUES (?, ?, ?, ?, 1)
+                ON CONFLICT (week_id, employee_id, work_date)
+                DO UPDATE SET hours = excluded.hours, is_manual = 1
+                """,
+                [
+                    (week_id, leave_employee_id, day, settings["daily_hours"])
+                    for day in sorted(weekend_days - leave_days)
+                ],
+            )
+
+        refreshed_week = week_row(connection, week_id)
+        employees = selected_employees(connection, week_id)
+        availability = availability_map(
+            connection, refreshed_week, employees, settings
+        )
+        efficiency = float(settings["efficiency"])
+        block_hours = float(settings.get("overtime_block_hours", 4.0))
+        existing_load = {
+            row["work_date"]: int(
+                round(float(row["hours"] or 0) * 60)
+            )
+            for row in connection.execute(
+                """
+                SELECT work_date,
+                       SUM(quantity * standard_hours_snapshot) AS hours
+                FROM assignments
+                WHERE week_id = ? AND employee_id = ?
+                GROUP BY work_date
+                """,
+                (week_id, leave_employee_id),
+            ).fetchall()
+        }
+        approved = {
+            row["work_date"]: float(row["hours"])
+            for row in connection.execute(
+                """
+                SELECT work_date, hours FROM overtime_approvals
+                WHERE week_id = ? AND employee_id = ?
+                """,
+                (week_id, leave_employee_id),
+            ).fetchall()
+        }
+        residual = {
+            day: max(
+                0,
+                int(
+                    round(
+                        (
+                            availability[(leave_employee_id, day)]
+                            + approved.get(day, 0.0)
+                        )
+                        * efficiency
+                        * 60
+                    )
                 )
-            else:
-                connection.execute(
-                    """
-                    DELETE FROM overtime_approvals
-                    WHERE week_id = ? AND employee_id = ? AND work_date = ?
-                    """,
-                    key,
+                - existing_load.get(day, 0),
+            )
+            for day in all_days
+            if day not in leave_days
+        }
+        overtime_days = [
+            day
+            for day in sorted(all_days, reverse=True)
+            if day not in leave_days
+            and availability[(leave_employee_id, day)] > 0
+            and day not in approved
+        ]
+        grouped_released: dict[tuple[int, int | None, float], int] = defaultdict(int)
+        for row in released_rows:
+            grouped_released[
+                (
+                    int(row["part_id"]),
+                    int(row["order_item_id"]) if row["order_item_id"] is not None else None,
+                    float(row["standard_hours_snapshot"]),
                 )
+            ] += int(row["quantity"])
+
+        recovered: dict[tuple[int, int | None, float, str], int] = defaultdict(int)
+        for (part_id, order_item_id, standard_hours), quantity in sorted(
+            grouped_released.items(),
+            key=lambda item: (-item[0][2], item[0][0], item[0][1] or 0),
+        ):
+            unit_minutes = max(1, int(round(standard_hours * 60)))
+            for _ in range(quantity):
+                candidates = [
+                    day
+                    for day, capacity in residual.items()
+                    if capacity >= unit_minutes
+                ]
+                while not candidates and payload.use_overtime and overtime_days:
+                    overtime_day = overtime_days.pop(0)
+                    connection.execute(
+                        """
+                        INSERT INTO overtime_approvals
+                            (week_id, employee_id, work_date, hours, is_manual)
+                        VALUES (?, ?, ?, ?, 1)
+                        ON CONFLICT (week_id, employee_id, work_date)
+                        DO UPDATE SET hours = excluded.hours, is_manual = 1
+                        """,
+                        (week_id, leave_employee_id, overtime_day, block_hours),
+                    )
+                    residual[overtime_day] = (
+                        residual.get(overtime_day, 0)
+                        + int(round(block_hours * efficiency * 60))
+                    )
+                    candidates = [
+                        day
+                        for day, capacity in residual.items()
+                        if capacity >= unit_minutes
+                    ]
+                if not candidates:
+                    continue
+                target_day = min(
+                    candidates,
+                    key=lambda day: (
+                        date.fromisoformat(day).weekday() >= 5,
+                        -residual[day],
+                        day,
+                    ),
+                )
+                residual[target_day] -= unit_minutes
+                recovered[
+                    (part_id, order_item_id, standard_hours, target_day)
+                ] += 1
+
+        connection.executemany(
+            """
+            INSERT INTO assignments
+                (week_id, employee_id, part_id, work_date, quantity,
+                 standard_hours_snapshot, order_item_id, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')
+            """,
+            [
+                (
+                    week_id,
+                    leave_employee_id,
+                    part_id,
+                    work_date,
+                    quantity,
+                    standard_hours,
+                    order_item_id,
+                )
+                for (
+                    part_id,
+                    order_item_id,
+                    standard_hours,
+                    work_date,
+                ), quantity in recovered.items()
+                if quantity > 0
+            ],
+        )
         connection.execute(
             """
             UPDATE week_plans
@@ -1754,12 +1940,7 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
             """,
             (week_id,),
         )
-        if connection.execute(
-            "SELECT 1 FROM production_orders WHERE status = 'active' LIMIT 1"
-        ).fetchone():
-            generate_cross_week(connection)
-        else:
-            run_generator(connection, week_id)
+        refresh_week_status(connection, week_id)
         detail = calculate_week(connection, week_id)
         detail["adjustment_id"] = int(cursor.lastrowid)
         return detail
@@ -1824,10 +2005,16 @@ def cancel_leave_adjustment(week_id: int):
         connection.execute(
             """
             UPDATE week_plans
-            SET status = ?, confirmed_at = ?, updated_at = CURRENT_TIMESTAMP
+            SET status = ?, confirmed_at = ?, include_weekend = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (original_week["status"], original_week["confirmed_at"], week_id),
+            (
+                original_week["status"],
+                original_week["confirmed_at"],
+                int(original_week.get("include_weekend", False)),
+                week_id,
+            ),
         )
         connection.execute(
             """

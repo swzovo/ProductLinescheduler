@@ -424,6 +424,18 @@ label small, .field-note { color: var(--muted); font-size: 10px; }
 .leave-employee-list > button:hover { border-color: #5f9e88; background: #f1f8f5; }
 .leave-employee-list span:last-child { display: grid; gap: 3px; }
 .leave-employee-list small { color: var(--muted); }
+.leave-date-picker { display: grid; grid-template-columns: repeat(7, minmax(82px, 1fr)); gap: 8px; }
+.leave-date-picker > button { min-height: 112px; padding: 10px 6px; border: 1px solid var(--line); border-radius: 12px; background: white; color: var(--ink); display: grid; justify-items: center; align-content: center; gap: 3px; }
+.leave-date-picker > button span, .leave-date-picker > button small { color: var(--muted); }
+.leave-date-picker > button em { margin-top: 4px; color: #2d7c68; font-size: 9px; font-style: normal; font-weight: 700; }
+.leave-date-picker > button.selected { border-color: #e28a5b; background: #fff2e9; color: #9d4823; }
+.leave-date-picker > button.selected em { color: #b44f27; }
+.leave-date-picker > button:disabled { opacity: .48; cursor: not-allowed; }
+.leave-recovery-options { margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.leave-recovery-options > label { padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #f7faf8; display: flex; align-items: flex-start; gap: 10px; }
+.leave-recovery-options input { width: 18px; height: 18px; margin-top: 2px; accent-color: #287762; }
+.leave-recovery-options span { display: grid; gap: 3px; }
+.leave-recovery-options small { color: var(--muted); line-height: 1.45; }
 .adjustment-banner { margin: 0 0 16px; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .daily-overtime-control { display: block; }
 .overtime-block-toggle { min-height: 38px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px; display: flex; align-items: center; gap: 9px; background: #f7f9f7; color: var(--muted); font-size: 11px; font-weight: 700; cursor: pointer; }
@@ -468,6 +480,8 @@ label small, .field-note { color: var(--muted); font-size: 10px; }
   .skill-picker-toolbar { align-items: stretch; flex-direction: column; }
   .skill-selection-count { padding: 0; }
   .weekday-picker > div { grid-template-columns: repeat(4, 1fr); }
+  .leave-date-picker { grid-template-columns: repeat(2, 1fr); }
+  .leave-recovery-options { grid-template-columns: 1fr; }
   .week-select-row { flex-wrap: wrap; }.week-select-row select { min-width: 0; width: 100%; font-size: 17px; }
   .availability-editor-head { display: none; }
   .availability-editor-row { grid-template-columns: 1fr; }

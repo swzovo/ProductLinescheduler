@@ -271,8 +271,23 @@ class AvailabilityUpdate(BaseModel):
 
 
 class LeaveAdjustmentCreate(BaseModel):
-    entries: list[AvailabilityInput] = Field(min_length=1, max_length=100)
+    # entries 为3.0旧界面兼容字段；新界面直接提交员工和请假日期。
+    entries: list[AvailabilityInput] = Field(default_factory=list, max_length=100)
     overtime_entries: list[OvertimeAvailabilityInput] = Field(default_factory=list)
+    employee_id: int | None = None
+    leave_dates: list[date] = Field(default_factory=list, max_length=7)
+    use_overtime: bool = True
+    use_weekend: bool = True
+
+    @model_validator(mode="after")
+    def validate_leave_selection(self):
+        if self.employee_id is None and not self.entries:
+            raise ValueError("请选择请假员工和日期")
+        if self.employee_id is not None and not self.leave_dates:
+            raise ValueError("请至少选择一个请假日期")
+        if len(self.leave_dates) != len(set(self.leave_dates)):
+            raise ValueError("请假日期不能重复")
+        return self
 
 
 class ResolveShortage(BaseModel):

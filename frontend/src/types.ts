@@ -230,6 +230,11 @@ export interface WeekDetail {
     id: number;
     status: "active";
     created_at: string;
+    employee_id?: number;
+    leave_dates?: string[];
+    use_overtime?: boolean;
+    use_weekend?: boolean;
+    released_quantity?: number;
   } | null;
   settings: Settings;
   days: string[];
