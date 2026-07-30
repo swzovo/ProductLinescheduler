@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from .clock import generation_today
 from .scheduler import active_dates
 from .service import (
     _employee_limit,
@@ -97,6 +98,8 @@ def create_order_snapshot(
     quantity: int,
     start_date: str,
     end_date: str,
+    origin: str = "manual",
+    import_week_start: str | None = None,
 ) -> int:
     if order_type == "machine":
         source = connection.execute(
@@ -144,12 +147,14 @@ def create_order_snapshot(
         """
         INSERT INTO production_orders
             (order_type, machine_id, accessory_part_id, quantity, start_date,
-             end_date, status, source_code_snapshot, source_name_snapshot)
-        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+             end_date, status, source_code_snapshot, source_name_snapshot,
+             origin, import_week_start)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
         """,
         (
             order_type, machine_id, accessory_part_id, quantity, start_date,
-            end_date, source["code"], source["name"],
+            end_date, source["code"], source["name"], origin,
+            import_week_start,
         ),
     )
     order_id = int(cursor.lastrowid)
@@ -292,6 +297,8 @@ def order_response(connection: sqlite3.Connection, order_id: int) -> dict[str, A
         "start_date": order["start_date"],
         "end_date": order["end_date"],
         "status": order["status"],
+        "origin": order["origin"],
+        "import_week_start": order["import_week_start"],
         "needs_generation": bool(order["needs_generation"]),
         "schedule_status": (
             "completed" if remaining_quantity == 0 else
@@ -332,10 +339,20 @@ def list_orders(connection: sqlite3.Connection, include_legacy: bool = False) ->
     return [order_response(connection, int(row["id"])) for row in ids]
 
 
-def _ensure_weeks(connection: sqlite3.Connection, orders: list[sqlite3.Row]) -> list[sqlite3.Row]:
+def _ensure_weeks(
+    connection: sqlite3.Connection,
+    orders: list[sqlite3.Row],
+    today: date,
+) -> list[sqlite3.Row]:
     if not orders:
         return []
-    first = min(date.fromisoformat(row["start_date"]) for row in orders)
+    first = min(
+        min(date.fromisoformat(row["start_date"]), today)
+        if row["order_type"] == "machine"
+        and date.fromisoformat(row["end_date"]) >= today
+        else date.fromisoformat(row["start_date"])
+        for row in orders
+    )
     last = max(date.fromisoformat(row["end_date"]) for row in orders)
     settings = current_settings(connection)
     cursor = monday_for(first)
@@ -370,6 +387,7 @@ def _eligible_slots(
     employee_type: str,
     priorities: dict[tuple[int, int], int] | None = None,
     required_priority: int | None = None,
+    earliest_day: str | None = None,
 ) -> dict[str, list[tuple[int, int]]]:
     result: dict[str, list[tuple[int, int]]] = defaultdict(list)
     for week in weeks:
@@ -377,7 +395,12 @@ def _eligible_slots(
             continue
         week_id = int(week["id"])
         for day in active_dates(week["week_start"], bool(week["include_weekend"])):
-            if day < order["start_date"] or day > order["end_date"]:
+            if (
+                day < order["start_date"]
+                or day > order["end_date"]
+                or earliest_day is not None
+                and day < earliest_day
+            ):
                 continue
             for employee in employees_by_week[week_id]:
                 if employee["employee_type"] != employee_type:
@@ -397,14 +420,82 @@ def _eligible_slots(
     return result
 
 
+def _configured_priority_levels(
+    priorities: dict[tuple[int, int], int],
+    part_id: int,
+) -> tuple[int | None, ...]:
+    """返回零件已配置的员工级别；未配置时沿用普通技能均衡规则。"""
+    configured = {
+        priority_level
+        for (employee_id, priority_part_id), priority_level in priorities.items()
+        if priority_part_id == part_id
+    }
+    levels = tuple(
+        priority_level
+        for priority_level in (1, 2, 3)
+        if priority_level in configured
+    )
+    return levels or (None,)
+
+
+def _available_work_days(
+    weeks: list[sqlite3.Row],
+    earliest: str,
+    latest: str,
+) -> list[str]:
+    return sorted(
+        day
+        for week in weeks
+        if week["status"] != "confirmed"
+        for day in active_dates(
+            week["week_start"], bool(week["include_weekend"])
+        )
+        if earliest <= day <= latest
+    )
+
+
+def _eligible_pairs_on_day(
+    day: str,
+    weeks: list[sqlite3.Row],
+    employees_by_week: dict[int, list[sqlite3.Row]],
+    skills: dict[int, set[int]],
+    residual: dict[tuple[int, int, str], int],
+    part_id: int,
+    unit_minutes: int,
+    priorities: dict[tuple[int, int], int],
+    priority_level: int,
+) -> list[tuple[int, int]]:
+    for week in weeks:
+        if week["status"] == "confirmed":
+            continue
+        active = active_dates(
+            week["week_start"], bool(week["include_weekend"])
+        )
+        if day not in active:
+            continue
+        week_id = int(week["id"])
+        return [
+            (week_id, int(employee["id"]))
+            for employee in employees_by_week.get(week_id, [])
+            if part_id in skills.get(int(employee["id"]), set())
+            and priorities.get((int(employee["id"]), part_id))
+            == priority_level
+            and residual.get((week_id, int(employee["id"]), day), 0)
+            >= unit_minutes
+        ]
+    return []
+
+
 def generate_cross_week(
     connection: sqlite3.Connection,
     overtime_by_week: dict[int, list[int]] | None = None,
 ) -> dict[str, Any]:
+    today = generation_today()
+    today_text = today.isoformat()
     orders = connection.execute(
         "SELECT * FROM production_orders WHERE status = 'active' ORDER BY end_date, id"
     ).fetchall()
-    weeks = _ensure_weeks(connection, orders)
+    weeks = _ensure_weeks(connection, orders, today)
     active_item_ids = [
         int(row["id"])
         for row in connection.execute(
@@ -470,8 +561,14 @@ def generate_cross_week(
                 [*unconfirmed_ids, *managed_item_ids],
             )
             connection.execute(
-                f"DELETE FROM assignments WHERE week_id IN ({placeholders}) AND source = 'generated' AND order_item_id IN ({item_placeholders})",
-                [*unconfirmed_ids, *managed_item_ids],
+                f"""
+                DELETE FROM assignments
+                WHERE week_id IN ({placeholders})
+                  AND source = 'generated'
+                  AND order_item_id IN ({item_placeholders})
+                  AND work_date >= ?
+                """,
+                [*unconfirmed_ids, *managed_item_ids, today_text],
             )
             if cancelled_item_ids:
                 cancelled_placeholders = ",".join("?" for _ in cancelled_item_ids)
@@ -542,16 +639,23 @@ def generate_cross_week(
         FROM assignments a
         LEFT JOIN production_order_items poi ON poi.id = a.order_item_id
         JOIN week_plans wp ON wp.id = a.week_id
-        WHERE wp.status = 'confirmed' OR a.source = 'manual'
+        WHERE wp.status = 'confirmed'
+           OR a.source = 'manual'
+           OR a.work_date < ?
         """
+        ,
+        (today_text,),
     ).fetchall()
     locked_by_item: dict[int, int] = defaultdict(int)
+    locked_by_target: dict[tuple[int, str], int] = defaultdict(int)
     day_item_quantity: dict[tuple[int, str], int] = defaultdict(int)
     for row in locked:
         if row["order_item_id"] is not None:
             item_id = int(row["order_item_id"])
             locked_by_item[item_id] += int(row["quantity"])
-            day_item_quantity[(item_id, row["work_date"])] += int(row["quantity"])
+            target_date = row["target_date"] or row["work_date"]
+            locked_by_target[(item_id, target_date)] += int(row["quantity"])
+            day_item_quantity[(item_id, target_date)] += int(row["quantity"])
         key = (int(row["week_id"]), int(row["employee_id"]), row["work_date"])
         residual[key] = max(
             0,
@@ -559,8 +663,9 @@ def generate_cross_week(
             - int(round(int(row["quantity"]) * float(row["item_hours"]) * 60)),
         )
 
-    generated: dict[tuple[int, int, int, str], int] = defaultdict(int)
+    generated: dict[tuple[int, int, int, str, str], int] = defaultdict(int)
     remaining_by_item: dict[int, int] = {}
+    remaining_machine_targets: dict[tuple[int, str], int] = {}
 
     def worker_load_key(
         candidate: tuple[int, int],
@@ -597,118 +702,239 @@ def generate_cross_week(
                  po.end_date, po.id, poi.standard_hours_snapshot DESC, poi.id
         """
     ).fetchall()
+    machine_target_units: dict[int, dict[str, int]] = {}
+    for order in orders:
+        if order["order_type"] != "machine":
+            continue
+        target_days = sorted(
+            {
+                day
+                for week in weeks
+                for day in active_dates(
+                    week["week_start"], bool(week["include_weekend"])
+                )
+                if order["start_date"] <= day <= order["end_date"]
+            }
+        )
+        if not target_days:
+            target_days = [order["end_date"]]
+        targets: dict[str, int] = {}
+        previous = 0
+        for index, target_day in enumerate(target_days):
+            cumulative = math.floor(
+                (
+                    (index + 1)
+                    * int(order["quantity"])
+                    / max(len(target_days), 1)
+                )
+                + 0.5
+            )
+            targets[target_day] = cumulative - previous
+            previous = cumulative
+        machine_target_units[int(order["id"])] = targets
+
     for item in items:
         item_id = int(item["id"])
         order = order_by_id[int(item["production_order_id"])]
-        remaining = max(0, int(item["required_quantity"]) - locked_by_item[item_id])
         unit_minutes = max(1, int(round(float(item["standard_hours_snapshot"]) * 60)))
-        if remaining == 0:
-            continue
         if item["order_type"] == "machine":
-            all_days = sorted(
-                day
-                for week in weeks
-                for day in active_dates(week["week_start"], bool(week["include_weekend"]))
-                if order["start_date"] <= day <= order["end_date"]
+            order_targets = machine_target_units.get(
+                int(item["production_order_id"]), {}
             )
-            targets: dict[str, int] = {}
-            previous_target = 0
-            for index, candidate_day in enumerate(all_days):
-                cumulative = math.floor(
-                    ((index + 1) * int(item["required_quantity"]) / max(len(all_days), 1))
-                    + 0.5
+            quantity_per_machine = int(item["quantity_per_unit"])
+            item_remaining = 0
+            for target_day, machine_quantity in sorted(order_targets.items()):
+                required = machine_quantity * quantity_per_machine
+                remaining = max(
+                    0,
+                    required - locked_by_target[(item_id, target_day)],
                 )
-                targets[candidate_day] = cumulative - previous_target
-                previous_target = cumulative
-            for priority_level in (1, 2):
-              for employee_type in ("core", "backup"):
-                while remaining > 0:
+                candidate_days = list(
+                    reversed(
+                        _available_work_days(
+                            weeks,
+                            today_text,
+                            target_day,
+                        )
+                    )
+                )
+                for work_day in candidate_days:
+                    for priority_level in (1, 2, 3):
+                        while remaining > 0:
+                            candidates = _eligible_pairs_on_day(
+                                work_day,
+                                weeks,
+                                employees_by_week,
+                                skills,
+                                residual,
+                                int(item["part_id"]),
+                                unit_minutes,
+                                priorities,
+                                priority_level,
+                            )
+                            if not candidates:
+                                break
+                            week_id, employee_id = max(
+                                candidates,
+                                key=lambda pair: (
+                                    residual[
+                                        (pair[0], pair[1], work_day)
+                                    ],
+                                    -pair[1],
+                                ),
+                            )
+                            key = (week_id, employee_id, work_day)
+                            residual[key] -= unit_minutes
+                            generated[
+                                (
+                                    week_id,
+                                    employee_id,
+                                    item_id,
+                                    work_day,
+                                    target_day,
+                                )
+                            ] += 1
+                            remaining -= 1
+                        if remaining == 0:
+                            break
+                    if remaining == 0:
+                        break
+                remaining_machine_targets[(item_id, target_day)] = remaining
+                item_remaining += remaining
+            remaining_by_item[item_id] = item_remaining
+        else:
+            remaining = max(
+                0,
+                int(item["required_quantity"]) - locked_by_item[item_id],
+            )
+            if remaining == 0:
+                remaining_by_item[item_id] = 0
+                continue
+            part_id = int(item["part_id"])
+            # 附件订单同样遵守零件员工级别：先用完员工1在整个订单
+            # 日期范围内的剩余正常产能，仍无法按期完成时才依次使用员工2、员工3。
+            # 未配置员工级别的旧数据继续按技能和负荷均衡分配。
+            for priority_level in _configured_priority_levels(
+                priorities, part_id
+            ):
+                for employee_type in ("core", "backup"):
                     slots = _eligible_slots(
                         order, weeks, employees_by_week, skills, residual,
-                        int(item["part_id"]), unit_minutes, employee_type,
+                        part_id, unit_minutes, employee_type,
                         priorities, priority_level,
+                        today_text,
                     )
-                    if not slots:
-                        break
-                    day = min(
-                        slots,
-                        key=lambda candidate: (
-                            -(targets.get(candidate, 0) - day_item_quantity[(item_id, candidate)]),
-                            day_item_quantity[(item_id, candidate)],
-                            candidate,
-                        ),
-                    )
-                    week_id, employee_id = max(
-                        slots[day],
-                        key=lambda pair: (
-                            residual[(pair[0], pair[1], day)]
-                            / max(original[(pair[0], pair[1], day)], 1),
-                            residual[(pair[0], pair[1], day)],
-                            -pair[1],
-                        ),
-                    )
-                    key = (week_id, employee_id, day)
-                    residual[key] -= unit_minutes
-                    generated[(week_id, employee_id, item_id, day)] += 1
-                    day_item_quantity[(item_id, day)] += 1
-                    remaining -= 1
-        else:
-            for employee_type in ("core", "backup"):
-                slots = _eligible_slots(
-                    order, weeks, employees_by_week, skills, residual,
-                    int(item["part_id"]), unit_minutes, employee_type,
-                    priorities,
-                    2 if bool(item["is_dual_usage_snapshot"]) else None,
-                )
-                for day in sorted(slots):
-                    while remaining > 0:
-                        candidates = [
-                            pair
-                            for pair in slots[day]
-                            if residual[(pair[0], pair[1], day)] >= unit_minutes
-                        ]
-                        if not candidates:
+                    for day in sorted(slots):
+                        while remaining > 0:
+                            candidates = [
+                                pair
+                                for pair in slots[day]
+                                if residual[(pair[0], pair[1], day)] >= unit_minutes
+                            ]
+                            if not candidates:
+                                break
+                            week_id, employee_id = min(
+                                candidates,
+                                key=lambda pair: worker_load_key(pair, day),
+                            )
+                            key = (week_id, employee_id, day)
+                            residual[key] -= unit_minutes
+                            generated[
+                                (week_id, employee_id, item_id, day, day)
+                            ] += 1
+                            remaining -= 1
+                        if remaining == 0:
                             break
-                        week_id, employee_id = min(
-                            candidates,
-                            key=lambda pair: worker_load_key(pair, day),
-                        )
-                        key = (week_id, employee_id, day)
-                        residual[key] -= unit_minutes
-                        generated[(week_id, employee_id, item_id, day)] += 1
-                        remaining -= 1
                     if remaining == 0:
                         break
                 if remaining == 0:
                     break
-        remaining_by_item[item_id] = remaining
+            remaining_by_item[item_id] = remaining
 
     # 自动加班使用独立的四小时班次，不参与正常工时均衡；按任务截止日期
-    # 从后往前填充，且继续遵守整机优先和员工1/员工2规则。
+    # 从后往前填充，且继续遵守整机优先和员工1/员工2/员工3规则。
     for item in items:
         item_id = int(item["id"])
-        remaining = remaining_by_item.get(item_id, 0)
-        if remaining <= 0:
-            continue
         order = order_by_id[int(item["production_order_id"])]
         part_id = int(item["part_id"])
         unit_minutes = max(
             1, int(round(float(item["standard_hours_snapshot"]) * 60))
         )
-        priority_levels: tuple[int | None, ...]
         if item["order_type"] == "machine":
-            priority_levels = (1, 2)
-        elif bool(item["is_dual_usage_snapshot"]):
-            priority_levels = (2,)
-        else:
-            priority_levels = (None,)
+            for target_day in sorted(
+                target
+                for (target_item_id, target), quantity
+                in remaining_machine_targets.items()
+                if target_item_id == item_id and quantity > 0
+            ):
+                remaining = remaining_machine_targets[(item_id, target_day)]
+                candidate_days = list(
+                    reversed(
+                        _available_work_days(
+                            weeks, today_text, target_day
+                        )
+                    )
+                )
+                for work_day in candidate_days:
+                    for priority_level in (1, 2, 3):
+                        matching_keys = sorted(
+                            (
+                                key
+                                for key, capacity in overtime_residual.items()
+                                if key[2] == work_day
+                                and capacity >= unit_minutes
+                                and part_id in skills.get(key[1], set())
+                                and priorities.get((key[1], part_id))
+                                == priority_level
+                            ),
+                            key=lambda key: key[1],
+                        )
+                        for week_id, employee_id, day in matching_keys:
+                            key = (week_id, employee_id, day)
+                            while (
+                                remaining > 0
+                                and overtime_residual.get(key, 0)
+                                >= unit_minutes
+                            ):
+                                overtime_residual[key] -= unit_minutes
+                                generated[
+                                    (
+                                        week_id,
+                                        employee_id,
+                                        item_id,
+                                        day,
+                                        target_day,
+                                    )
+                                ] += 1
+                                remaining -= 1
+                            if remaining == 0:
+                                break
+                        if remaining == 0:
+                            break
+                    if remaining == 0:
+                        break
+                remaining_machine_targets[(item_id, target_day)] = remaining
+            remaining_by_item[item_id] = sum(
+                quantity
+                for (target_item_id, _), quantity
+                in remaining_machine_targets.items()
+                if target_item_id == item_id
+            )
+            continue
+
+        remaining = remaining_by_item.get(item_id, 0)
+        if remaining <= 0:
+            continue
+        priority_levels = _configured_priority_levels(
+            priorities, part_id
+        )
         for priority_level in priority_levels:
             for employee_type in ("core", "backup"):
                 candidate_keys = [
                     key
                     for key, capacity in overtime_residual.items()
                     if capacity >= unit_minutes
-                    and key[2] >= order["start_date"]
+                    and key[2] >= max(order["start_date"], today_text)
                     and key[2] <= order["end_date"]
                     and any(
                         int(employee["id"]) == key[1]
@@ -732,7 +958,9 @@ def generate_cross_week(
                         and overtime_residual.get(key, 0) >= unit_minutes
                     ):
                         overtime_residual[key] -= unit_minutes
-                        generated[(week_id, employee_id, item_id, day)] += 1
+                        generated[
+                            (week_id, employee_id, item_id, day, day)
+                        ] += 1
                         day_item_quantity[(item_id, day)] += 1
                         remaining -= 1
                     if remaining == 0:
@@ -744,22 +972,28 @@ def generate_cross_week(
         remaining_by_item[item_id] = remaining
 
     item_by_id = {int(item["id"]): item for item in items}
-    for (week_id, employee_id, item_id, day), quantity in generated.items():
+    for (
+        week_id,
+        employee_id,
+        item_id,
+        day,
+        target_day,
+    ), quantity in generated.items():
         item = item_by_id[item_id]
         connection.execute(
             """
             INSERT INTO assignments
-                (week_id, employee_id, part_id, work_date, quantity,
+                (week_id, employee_id, part_id, work_date, target_date, quantity,
                  standard_hours_snapshot, order_item_id, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'generated')
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'generated')
             """,
             (
-                week_id, employee_id, item["part_id"], day, quantity,
+                week_id, employee_id, item["part_id"], day, target_day, quantity,
                 item["standard_hours_snapshot"], item_id,
             ),
         )
 
-    # 周需求由任务来源分配生成；未排数量归入截止日期所在的最后一个未确认周。
+    # 周需求按实际生产周归集；整机未排数量保留在其每日目标所在周。
     quantities = defaultdict(int)
     assigned_rows = connection.execute(
         """
@@ -776,6 +1010,33 @@ def generate_cross_week(
         quantities[(int(row["week_id"]), int(row["order_item_id"]))] += int(row["quantity"])
         assigned_total[int(row["order_item_id"])] += int(row["quantity"])
     for item in items:
+        if item["order_type"] == "machine":
+            for (target_item_id, target_day), remaining in (
+                remaining_machine_targets.items()
+            ):
+                if target_item_id != int(item["id"]) or remaining <= 0:
+                    continue
+                target_week = next(
+                    (
+                        week
+                        for week in weeks
+                        if week["week_start"] <= target_day
+                        and (
+                            date.fromisoformat(week["week_start"])
+                            + timedelta(days=6)
+                        ).isoformat()
+                        >= target_day
+                    ),
+                    None,
+                )
+                if (
+                    target_week is not None
+                    and target_week["status"] != "confirmed"
+                ):
+                    quantities[
+                        (int(target_week["id"]), int(item["id"]))
+                    ] += remaining
+            continue
         remaining = max(0, int(item["required_quantity"]) - assigned_total[int(item["id"])])
         if not remaining:
             continue

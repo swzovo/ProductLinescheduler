@@ -10,13 +10,17 @@ from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .database import connect, init_db, transaction
 from .order_import import preview_accessory_order_import
+from .matrix_import import (
+    preview_machine_bom_matrix,
+    preview_machine_plan_matrix,
+)
 from .part_import import preview_import
 from .schedule_export import render_schedule
 from .scheduler import active_dates
@@ -28,6 +32,8 @@ from .schemas import (
     EmployeeUpdate,
     LeaveAdjustmentCreate,
     MachineCreate,
+    MachineMatrixImportCommit,
+    MachinePlanImportCommit,
     MachineUpdate,
     PartCreate,
     PartImportCommit,
@@ -49,6 +55,7 @@ from .production import (
     order_response,
     save_machine_bom,
     update_order_snapshot,
+    generation_today,
 )
 from .service import (
     approve_required_overtime,
@@ -57,6 +64,8 @@ from .service import (
     confirm_week,
     current_settings,
     default_availability_for_employee,
+    employee_skill_priorities,
+    employee_skills,
     ensure_editable,
     refresh_week_status,
     reset_week_schedule,
@@ -159,7 +168,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="单产线整机与跨周排班系统", version="3.2.1", lifespan=lifespan)
+app = FastAPI(title="单产线整机与跨周排班系统", version="3.4.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -329,8 +338,12 @@ def part_response(
     item["level_2_employee_id"] = (
         int(by_level[2]["employee_id"]) if 2 in by_level else None
     )
+    item["level_3_employee_id"] = (
+        int(by_level[3]["employee_id"]) if 3 in by_level else None
+    )
     item["level_1_employee"] = by_level.get(1)
     item["level_2_employee"] = by_level.get(2)
+    item["level_3_employee"] = by_level.get(3)
     return item
 
 
@@ -354,11 +367,14 @@ def _save_part_employee_priorities(
         if count != len(employee_ids):
             raise HTTPException(
                 status_code=422,
-                detail="员工1/员工2中包含不存在或已停用的员工",
+                detail="员工1、员工2或员工3中包含不存在或已停用的员工",
             )
     levels = [int(item.priority_level) for item in priorities]
     if len(levels) != len(set(levels)):
-        raise HTTPException(status_code=422, detail="员工1和员工2每级最多选择一名员工")
+        raise HTTPException(
+            status_code=422,
+            detail="员工1、员工2和员工3每级最多选择一名员工",
+        )
     connection.execute(
         "DELETE FROM part_employee_priorities WHERE part_id = ?", (part_id,)
     )
@@ -392,6 +408,7 @@ def _part_priorities_from_payload(payload: PartCreate | PartUpdate):
     if {
         "level_1_employee_id",
         "level_2_employee_id",
+        "level_3_employee_id",
     } & payload.model_fields_set:
         from .schemas import PartSkillPriorityInput
 
@@ -400,6 +417,7 @@ def _part_priorities_from_payload(payload: PartCreate | PartUpdate):
             for level, employee_id in (
                 (1, payload.level_1_employee_id),
                 (2, payload.level_2_employee_id),
+                (3, payload.level_3_employee_id),
             )
             if employee_id is not None
         ]
@@ -482,6 +500,18 @@ def accessory_order_template_path() -> Path:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return Path(sys._MEIPASS) / "backend" / "assets" / "附件订单导入模板.xlsx"
     return Path(__file__).resolve().parents[1] / "assets" / "附件订单导入模板.xlsx"
+
+
+def machine_bom_template_path() -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "backend" / "assets" / "整机BOM矩阵导入模板.xlsx"
+    return Path(__file__).resolve().parents[1] / "assets" / "整机BOM矩阵导入模板.xlsx"
+
+
+def machine_plan_template_path() -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "backend" / "assets" / "整机周计划导入模板.xlsx"
+    return Path(__file__).resolve().parents[1] / "assets" / "整机周计划导入模板.xlsx"
 
 
 def template_download_directory() -> Path:
@@ -617,7 +647,9 @@ def commit_part_import(payload: PartImportCommit):
                     (part_id,),
                 )
                 explicit_priorities = bool(
-                    item.employee_level1_names or item.employee_level2_names
+                    item.employee_level1_names
+                    or item.employee_level2_names
+                    or item.employee_level3_names
                 )
                 priority_names = {
                     1: (
@@ -630,6 +662,11 @@ def commit_part_import(payload: PartImportCommit):
                         if item.employee_level2_names
                         else None
                     ),
+                    3: (
+                        item.employee_level3_names[0]
+                        if item.employee_level3_names
+                        else None
+                    ),
                 }
                 if not explicit_priorities:
                     priority_names[1] = (
@@ -638,44 +675,48 @@ def commit_part_import(payload: PartImportCommit):
                     priority_names[2] = (
                         item.employee_names[1] if len(item.employee_names) > 1 else None
                     )
+                    priority_names[3] = (
+                        item.employee_names[2] if len(item.employee_names) > 2 else None
+                    )
                 all_employee_names = list(
                     dict.fromkeys(
                         [
                             *item.employee_names,
                             *item.employee_level1_names,
                             *item.employee_level2_names,
+                            *item.employee_level3_names,
                         ]
                     )
                 )
                 employee_ids_by_name: dict[str, int] = {}
                 for employee_name in all_employee_names:
-                        employee = connection.execute(
-                            "SELECT id FROM employees WHERE name = ?",
-                            (employee_name,),
-                        ).fetchone()
-                        if employee is None:
-                            employee_id = int(
-                                connection.execute(
-                                    """
-                                    INSERT INTO employees (name, employee_type)
-                                    VALUES (?, 'core')
-                                    """,
-                                    (employee_name,),
-                                ).lastrowid
-                            )
-                            employees_created += 1
-                        else:
-                            employee_id = int(employee["id"])
-                        employee_ids_by_name[employee_name] = employee_id
-                        connection.execute(
-                            """
-                            INSERT INTO employee_skills
-                                (employee_id, part_id, priority_level)
-                            VALUES (?, ?, ?)
-                            """,
-                            (employee_id, part_id, 1),
+                    employee = connection.execute(
+                        "SELECT id FROM employees WHERE name = ?",
+                        (employee_name,),
+                    ).fetchone()
+                    if employee is None:
+                        employee_id = int(
+                            connection.execute(
+                                """
+                                INSERT INTO employees (name, employee_type)
+                                VALUES (?, 'core')
+                                """,
+                                (employee_name,),
+                            ).lastrowid
                         )
-                        skills_updated += 1
+                        employees_created += 1
+                    else:
+                        employee_id = int(employee["id"])
+                    employee_ids_by_name[employee_name] = employee_id
+                    connection.execute(
+                        """
+                        INSERT INTO employee_skills
+                            (employee_id, part_id, priority_level)
+                        VALUES (?, ?, ?)
+                        """,
+                        (employee_id, part_id, 1),
+                    )
+                    skills_updated += 1
                 for priority_level, employee_name in priority_names.items():
                     if employee_name is None:
                         continue
@@ -788,6 +829,94 @@ def list_machines():
             "SELECT id FROM machines ORDER BY code, id"
         ).fetchall()
         return [machine_response(connection, int(row["id"])) for row in ids]
+
+
+@app.get("/api/machines/import/template")
+def download_machine_bom_template():
+    path = machine_bom_template_path()
+    if not path.is_file():
+        raise HTTPException(status_code=500, detail="整机BOM矩阵模板缺失")
+    return FileResponse(
+        path,
+        filename="整机BOM矩阵导入模板.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.post("/api/machines/import/template/save")
+def save_machine_bom_template():
+    source = machine_bom_template_path()
+    if not source.is_file():
+        raise HTTPException(status_code=500, detail="整机BOM矩阵模板缺失")
+    try:
+        directory = template_download_directory()
+        directory.mkdir(parents=True, exist_ok=True)
+        target = available_download_path(directory, source.name)
+        shutil.copy2(source, target)
+    except OSError as error:
+        raise HTTPException(
+            status_code=500,
+            detail="模板保存失败，请检查下载文件夹的写入权限",
+        ) from error
+    return {"filename": target.name, "path": str(target)}
+
+
+@app.post("/api/machines/import/preview")
+async def preview_machine_bom_import(file: UploadFile = File(...)):
+    filename = file.filename or ""
+    content = await file.read()
+    with connect() as connection:
+        return preview_machine_bom_matrix(connection, filename, content)
+
+
+@app.post("/api/machines/import/commit")
+def commit_machine_bom_import(payload: MachineMatrixImportCommit):
+    codes = [item.code.strip() for item in payload.machines]
+    if len(codes) != len(set(codes)):
+        raise HTTPException(status_code=422, detail="导入数据中存在重复整机编号")
+    created = 0
+    updated = 0
+    try:
+        with transaction() as connection:
+            for item in payload.machines:
+                code = item.code.strip()
+                current = connection.execute(
+                    "SELECT id, active FROM machines WHERE code = ?",
+                    (code,),
+                ).fetchone()
+                if current is None:
+                    machine_id = int(
+                        connection.execute(
+                            """
+                            INSERT INTO machines (code, name, active)
+                            VALUES (?, ?, 1)
+                            """,
+                            (code, item.name.strip()),
+                        ).lastrowid
+                    )
+                    created += 1
+                else:
+                    machine_id = int(current["id"])
+                    connection.execute(
+                        """
+                        UPDATE machines
+                        SET name = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (item.name.strip(), machine_id),
+                    )
+                    updated += 1
+                save_machine_bom(connection, machine_id, item.bom_items)
+            return {
+                "created": created,
+                "updated": updated,
+                "total": created + updated,
+            }
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="整机编号或BOM数据冲突，整批导入未执行",
+        ) from error
 
 
 @app.post("/api/machines", status_code=201)
@@ -928,12 +1057,213 @@ def commit_accessory_orders(payload: AccessoryOrderImportCommit):
                     item.quantity,
                     item.start_date.isoformat(),
                     item.end_date.isoformat(),
+                    "accessory_import",
                 )
             )
         return {
             "created": len(created_ids),
             "order_ids": created_ids,
             "orders": [order_response(connection, order_id) for order_id in created_ids],
+        }
+
+
+@app.get("/api/production-orders/machine-plan-import/template")
+def download_machine_plan_template():
+    path = machine_plan_template_path()
+    if not path.is_file():
+        raise HTTPException(status_code=500, detail="整机周计划模板缺失")
+    return FileResponse(
+        path,
+        filename="整机周计划导入模板.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.post("/api/production-orders/machine-plan-import/template/save")
+def save_machine_plan_template():
+    source = machine_plan_template_path()
+    if not source.is_file():
+        raise HTTPException(status_code=500, detail="整机周计划模板缺失")
+    try:
+        directory = template_download_directory()
+        directory.mkdir(parents=True, exist_ok=True)
+        target = available_download_path(directory, source.name)
+        shutil.copy2(source, target)
+    except OSError as error:
+        raise HTTPException(
+            status_code=500,
+            detail="模板保存失败，请检查下载文件夹的写入权限",
+        ) from error
+    return {"filename": target.name, "path": str(target)}
+
+
+@app.post("/api/production-orders/machine-plan-import/preview")
+async def preview_machine_plan_import(
+    week_start: date = Form(...),
+    file: UploadFile = File(...),
+):
+    filename = file.filename or ""
+    content = await file.read()
+    with connect() as connection:
+        return preview_machine_plan_matrix(
+            connection,
+            filename,
+            content,
+            week_start,
+        )
+
+
+@app.post("/api/production-orders/machine-plan-import/commit")
+def commit_machine_plan_import(payload: MachinePlanImportCommit):
+    today = generation_today()
+    if any(item.target_date < today for item in payload.entries):
+        raise HTTPException(
+            status_code=422,
+            detail="计划中包含早于系统当天的日期，整批导入未执行",
+        )
+    with transaction() as connection:
+        settings = current_settings(connection)
+        week_start = payload.week_start.isoformat()
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO week_plans
+                (week_start, include_weekend, status, settings_snapshot)
+            VALUES (?, 0, 'draft', ?)
+            """,
+            (week_start, json.dumps(settings, ensure_ascii=False)),
+        )
+        week = connection.execute(
+            "SELECT * FROM week_plans WHERE week_start = ?",
+            (week_start,),
+        ).fetchone()
+        if week["status"] == "confirmed":
+            raise HTTPException(
+                status_code=409,
+                detail="目标周已经确认，请先取消确认后再导入",
+            )
+        if connection.execute(
+            """
+            SELECT 1 FROM week_adjustments
+            WHERE week_id = ? AND status = 'active'
+            """,
+            (week["id"],),
+        ).fetchone():
+            raise HTTPException(
+                status_code=409,
+                detail="目标周正在进行请假调整，请先完成或取消调整",
+            )
+
+        machines = {
+            str(row["code"]): row
+            for row in connection.execute(
+                "SELECT id, code, active FROM machines"
+            ).fetchall()
+        }
+        for item in payload.entries:
+            machine = machines.get(item.machine_code.strip())
+            if machine is None or not bool(machine["active"]):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"整机“{item.machine_code}”不存在或已停用",
+                )
+
+        old_orders = connection.execute(
+            """
+            SELECT id FROM production_orders
+            WHERE origin = 'machine_plan_import'
+              AND import_week_start = ?
+            """,
+            (week_start,),
+        ).fetchall()
+        old_order_ids = [int(row["id"]) for row in old_orders]
+        if old_order_ids:
+            placeholders = ",".join("?" for _ in old_order_ids)
+            locked = connection.execute(
+                f"""
+                SELECT 1
+                FROM assignments a
+                JOIN production_order_items poi ON poi.id = a.order_item_id
+                JOIN week_plans wp ON wp.id = a.week_id
+                WHERE poi.order_id IN ({placeholders})
+                  AND (
+                    wp.status = 'confirmed'
+                    OR a.source = 'manual'
+                    OR a.work_date < ?
+                  )
+                LIMIT 1
+                """,
+                [*old_order_ids, today.isoformat()],
+            ).fetchone()
+            if locked is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="原导入计划包含已确认、人工调整或已过去的排班，不能自动替换",
+                )
+            item_ids = [
+                int(row["id"])
+                for row in connection.execute(
+                    f"""
+                    SELECT id FROM production_order_items
+                    WHERE order_id IN ({placeholders})
+                    """,
+                    old_order_ids,
+                ).fetchall()
+            ]
+            if item_ids:
+                item_placeholders = ",".join("?" for _ in item_ids)
+                connection.execute(
+                    f"DELETE FROM assignments WHERE order_item_id IN ({item_placeholders})",
+                    item_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM week_order_demands WHERE order_item_id IN ({item_placeholders})",
+                    item_ids,
+                )
+            connection.execute(
+                f"DELETE FROM production_orders WHERE id IN ({placeholders})",
+                old_order_ids,
+            )
+
+        weekend_used = any(
+            item.target_date.weekday() >= 5 for item in payload.entries
+        )
+        if weekend_used:
+            connection.execute(
+                """
+                UPDATE week_plans
+                SET include_weekend = 1, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (week["id"],),
+            )
+
+        created_ids: list[int] = []
+        for item in sorted(
+            payload.entries,
+            key=lambda value: (
+                value.target_date,
+                value.machine_code,
+            ),
+        ):
+            machine = machines[item.machine_code.strip()]
+            created_ids.append(
+                create_order_snapshot(
+                    connection,
+                    "machine",
+                    int(machine["id"]),
+                    item.quantity,
+                    item.target_date.isoformat(),
+                    item.target_date.isoformat(),
+                    "machine_plan_import",
+                    week_start,
+                )
+            )
+        return {
+            "created": len(created_ids),
+            "replaced": len(old_order_ids),
+            "order_ids": created_ids,
+            "week_id": int(week["id"]),
+            "weekend_enabled": weekend_used,
         }
 
 
@@ -1103,7 +1433,7 @@ def _save_skills(connection: sqlite3.Connection, employee_id: int, part_ids: lis
         ],
     )
     # 兼容从员工管理添加技能的旧操作：若零件尚有空的优先槽位，
-    # 按员工加入顺序自动补为员工1、员工2，管理员之后仍可在零件管理修改。
+    # 按员工加入顺序自动补为员工1、员工2、员工3，管理员之后仍可修改。
     for part_id in unique_ids:
         if connection.execute(
             """
@@ -1124,7 +1454,7 @@ def _save_skills(connection: sqlite3.Connection, employee_id: int, part_ids: lis
             ).fetchall()
         }
         available_level = next(
-            (level for level in (1, 2) if level not in used_levels),
+            (level for level in (1, 2, 3) if level not in used_levels),
             None,
         )
         if available_level is not None:
@@ -1594,7 +1924,7 @@ def update_assignments(week_id: int, payload: AssignmentsUpdate):
         ).fetchone():
             raise HTTPException(
                 status_code=409,
-                detail="请假调整期间不能手工转派任务，任务必须由原员工完成",
+                detail="请假调整期间不能手工修改任务，请先完成或取消本次调整",
             )
         replace_assignments(
             connection,
@@ -1605,6 +1935,11 @@ def update_assignments(week_id: int, payload: AssignmentsUpdate):
                     "part_id": item.part_id,
                     "order_item_id": item.order_item_id,
                     "work_date": item.work_date.isoformat(),
+                    "target_date": (
+                        item.target_date.isoformat()
+                        if item.target_date is not None
+                        else item.work_date.isoformat()
+                    ),
                     "quantity": item.quantity,
                 }
                 for item in payload.assignments
@@ -1710,10 +2045,13 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
 
         released_rows = connection.execute(
             f"""
-            SELECT * FROM assignments
-            WHERE week_id = ? AND employee_id = ?
-              AND work_date IN ({','.join('?' for _ in leave_days)})
-            ORDER BY work_date, id
+            SELECT a.*, po.order_type
+            FROM assignments a
+            LEFT JOIN production_order_items poi ON poi.id = a.order_item_id
+            LEFT JOIN production_orders po ON po.id = poi.order_id
+            WHERE a.week_id = ? AND a.employee_id = ?
+              AND a.work_date IN ({','.join('?' for _ in leave_days)})
+            ORDER BY a.work_date, a.id
             """,
             (week_id, leave_employee_id, *sorted(leave_days)),
         ).fetchall()
@@ -1847,18 +2185,188 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
                 or payload.use_weekend
             )
         ]
-        grouped_released: dict[tuple[int, int | None, float], int] = defaultdict(int)
+        employee_by_id = {int(employee["id"]): employee for employee in employees}
+        all_skills = employee_skills(connection, list(employee_by_id))
+        all_priorities = employee_skill_priorities(
+            connection, list(employee_by_id)
+        )
+        approved_by_employee = {
+            (int(row["employee_id"]), row["work_date"]): float(row["hours"])
+            for row in connection.execute(
+                """
+                SELECT employee_id, work_date, hours
+                FROM overtime_approvals WHERE week_id = ?
+                """,
+                (week_id,),
+            ).fetchall()
+        }
+        load_by_employee = {
+            (int(row["employee_id"]), row["work_date"]): int(
+                round(float(row["hours"] or 0) * 60)
+            )
+            for row in connection.execute(
+                """
+                SELECT employee_id, work_date,
+                       SUM(quantity * standard_hours_snapshot) AS hours
+                FROM assignments
+                WHERE week_id = ?
+                GROUP BY employee_id, work_date
+                """,
+                (week_id,),
+            ).fetchall()
+        }
+        employee_residual = {
+            (employee_id, day): max(
+                0,
+                int(
+                    round(
+                        (
+                            availability[(employee_id, day)]
+                            + approved_by_employee.get(
+                                (employee_id, day), 0.0
+                            )
+                        )
+                        * efficiency
+                        * 60
+                    )
+                )
+                - load_by_employee.get((employee_id, day), 0),
+            )
+            for employee_id in employee_by_id
+            for day in all_days
+        }
+
+        recovered_machine: dict[
+            tuple[int, int | None, float, str, str, int], int
+        ] = defaultdict(int)
+        today_text = generation_today().isoformat()
         for row in released_rows:
+            if row["order_type"] != "machine":
+                continue
+            part_id = int(row["part_id"])
+            order_item_id = (
+                int(row["order_item_id"])
+                if row["order_item_id"] is not None
+                else None
+            )
+            standard_hours = float(row["standard_hours_snapshot"])
+            unit_minutes = max(1, int(round(standard_hours * 60)))
+            original_work_date = row["work_date"]
+            target_date = row["target_date"] or original_work_date
+            candidate_days = [
+                day
+                for day in sorted(all_days, reverse=True)
+                if today_text <= day <= original_work_date
+                and (
+                    date.fromisoformat(day).weekday() < 5
+                    or bool(refreshed_week["include_weekend"])
+                )
+            ]
+            for _ in range(int(row["quantity"])):
+                allocated = False
+                for work_day in candidate_days:
+                    for priority_level in (1, 2, 3):
+                        candidate_ids = sorted(
+                            employee_id
+                            for employee_id in employee_by_id
+                            if (
+                                employee_id != leave_employee_id
+                                or work_day not in leave_days
+                            )
+                            and part_id in all_skills.get(employee_id, set())
+                            and all_priorities.get((employee_id, part_id))
+                            == priority_level
+                            and employee_residual.get(
+                                (employee_id, work_day), 0
+                            )
+                            >= unit_minutes
+                        )
+                        if not candidate_ids:
+                            continue
+                        target_employee_id = candidate_ids[0]
+                        employee_residual[
+                            (target_employee_id, work_day)
+                        ] -= unit_minutes
+                        if target_employee_id == leave_employee_id:
+                            residual[work_day] = max(
+                                0,
+                                residual.get(work_day, 0) - unit_minutes,
+                            )
+                        recovered_machine[
+                            (
+                                part_id,
+                                order_item_id,
+                                standard_hours,
+                                work_day,
+                                target_date,
+                                target_employee_id,
+                            )
+                        ] += 1
+                        allocated = True
+                        break
+                    if allocated:
+                        break
+
+        connection.executemany(
+            """
+            INSERT INTO assignments
+                (week_id, employee_id, part_id, work_date, target_date,
+                 quantity, standard_hours_snapshot, order_item_id, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'manual')
+            ON CONFLICT (
+                week_id, employee_id, order_item_id, work_date, target_date
+            )
+            DO UPDATE SET
+                quantity = assignments.quantity + excluded.quantity,
+                source = 'manual'
+            """,
+            [
+                (
+                    week_id,
+                    employee_id,
+                    part_id,
+                    work_date,
+                    target_date,
+                    quantity,
+                    standard_hours,
+                    order_item_id,
+                )
+                for (
+                    part_id,
+                    order_item_id,
+                    standard_hours,
+                    work_date,
+                    target_date,
+                    employee_id,
+                ), quantity in recovered_machine.items()
+                if quantity > 0
+            ],
+        )
+
+        grouped_released: dict[
+            tuple[int, int | None, float, str], int
+        ] = defaultdict(int)
+        for row in released_rows:
+            if row["order_type"] == "machine":
+                continue
             grouped_released[
                 (
                     int(row["part_id"]),
                     int(row["order_item_id"]) if row["order_item_id"] is not None else None,
                     float(row["standard_hours_snapshot"]),
+                    row["target_date"] or row["work_date"],
                 )
             ] += int(row["quantity"])
 
-        recovered: dict[tuple[int, int | None, float, str], int] = defaultdict(int)
-        for (part_id, order_item_id, standard_hours), quantity in sorted(
+        recovered: dict[
+            tuple[int, int | None, float, str, str], int
+        ] = defaultdict(int)
+        for (
+            part_id,
+            order_item_id,
+            standard_hours,
+            original_target_date,
+        ), quantity in sorted(
             grouped_released.items(),
             key=lambda item: (-item[0][2], item[0][0], item[0][1] or 0),
         ):
@@ -1956,16 +2464,24 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
                 )
                 residual[target_day] -= unit_minutes
                 recovered[
-                    (part_id, order_item_id, standard_hours, target_day)
+                    (
+                        part_id,
+                        order_item_id,
+                        standard_hours,
+                        target_day,
+                        original_target_date,
+                    )
                 ] += 1
 
         connection.executemany(
             """
             INSERT INTO assignments
-                (week_id, employee_id, part_id, work_date, quantity,
-                 standard_hours_snapshot, order_item_id, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')
-            ON CONFLICT (week_id, employee_id, order_item_id, work_date)
+                (week_id, employee_id, part_id, work_date, target_date,
+                 quantity, standard_hours_snapshot, order_item_id, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'manual')
+            ON CONFLICT (
+                week_id, employee_id, order_item_id, work_date, target_date
+            )
             DO UPDATE SET
                 quantity = assignments.quantity + excluded.quantity,
                 source = 'manual'
@@ -1976,6 +2492,7 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
                     leave_employee_id,
                     part_id,
                     work_date,
+                    target_date,
                     quantity,
                     standard_hours,
                     order_item_id,
@@ -1985,6 +2502,7 @@ def create_leave_adjustment(week_id: int, payload: LeaveAdjustmentCreate):
                     order_item_id,
                     standard_hours,
                     work_date,
+                    target_date,
                 ), quantity in recovered.items()
                 if quantity > 0
             ],
@@ -2029,9 +2547,9 @@ def cancel_leave_adjustment(week_id: int):
         connection.executemany(
             """
             INSERT INTO assignments
-                (id, week_id, employee_id, part_id, work_date, quantity,
+                (id, week_id, employee_id, part_id, work_date, target_date, quantity,
                  standard_hours_snapshot, order_item_id, source)
-            VALUES (:id, :week_id, :employee_id, :part_id, :work_date, :quantity,
+            VALUES (:id, :week_id, :employee_id, :part_id, :work_date, :target_date, :quantity,
                     :standard_hours_snapshot, :order_item_id, :source)
             """,
             assignments,

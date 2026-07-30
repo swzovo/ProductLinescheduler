@@ -70,6 +70,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
     part_id: 0,
     order_item_id: null as number | null,
     work_date: "",
+    target_date: "",
     quantity: 1,
   });
   const [availabilityEmployee, setAvailabilityEmployee] = useState<WeekEmployee | null>(null);
@@ -263,22 +264,30 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
         part_id: assignment.part_id,
         order_item_id: assignment.order_item_id ?? null,
         work_date: assignment.work_date,
+        target_date: assignment.target_date,
         quantity: assignment.quantity,
       });
     } else {
+      const firstSource = week.demands[0]?.sources?.[0];
+      const firstWorkDate = week.days[0] ?? "";
       setAssignmentOpen("new");
       setAssignmentForm({
         employee_id: week.employees[0]?.id ?? 0,
         part_id: week.demands[0]?.part_id ?? 0,
-        order_item_id: week.demands[0]?.sources?.[0]?.order_item_id ?? null,
-        work_date: week.days[0] ?? "",
+        order_item_id: firstSource?.order_item_id ?? null,
+        work_date: firstWorkDate,
+        target_date:
+          firstSource?.order_type === "machine" &&
+          firstSource.start_date > firstWorkDate
+            ? firstSource.start_date
+            : firstWorkDate,
         quantity: 1,
       });
     }
   };
 
   const saveAssignments = async (
-    next: { employee_id: number; part_id: number; order_item_id?: number | null; work_date: string; quantity: number }[],
+    next: { employee_id: number; part_id: number; order_item_id?: number | null; work_date: string; target_date?: string; quantity: number }[],
   ) => {
     if (!week) return;
     const result = await api<WeekDetail>(`/weeks/${week.id}/assignments`, {
@@ -301,6 +310,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
           part_id: item.part_id,
           order_item_id: item.order_item_id ?? null,
           work_date: item.work_date,
+          target_date: item.target_date,
           quantity: item.quantity,
         }));
       await saveAssignments([...base, assignmentForm]);
@@ -326,6 +336,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
             part_id: item.part_id,
             order_item_id: item.order_item_id ?? null,
             work_date: item.work_date,
+            target_date: item.target_date,
             quantity: item.quantity,
           })),
       );
@@ -417,8 +428,8 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
       setMessage({
         text:
           result.summary.remaining_hours > 0
-            ? "请假已登记，但本人本周补班容量仍不足；可取消后调整补班方式"
-            : "请假已登记，原任务已全部安排给该员工本人补做",
+            ? "请假已登记，但仍有任务无法在目标期限内完成；可取消后调整补班方式"
+            : "请假已登记；整机任务已按优先员工转派或提前生产，附件任务已由本人补做",
         error: result.summary.remaining_hours > 0,
       });
     } catch (error) {
@@ -592,6 +603,9 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
       ),
     [week],
   );
+  const selectedAssignmentSource = assignmentSources.find(
+    (source) => source.order_item_id === assignmentForm.order_item_id,
+  );
 
   if (loading) return <div className="loading-page"><span /><p>正在载入排班数据…</p></div>;
 
@@ -728,7 +742,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
                 正在处理
                 {week.employees.find((employee) => employee.id === week.active_adjustment?.employee_id)?.name ?? "该员工"}
                 的请假（{week.active_adjustment.leave_dates?.map(shortDate).join("、")}）：
-                原任务只允许本人通过其他工作日、固定加班或周末补班完成。
+                整机任务按员工1→员工2→员工3在当天转派，必要时向前回排；附件任务仍由本人补做。
               </span>
               <button
                 type="button"
@@ -754,7 +768,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
               <div>
                 <strong>
                   {week.active_adjustment
-                    ? "请假员工本人的补班容量仍然不足"
+                    ? "请假调整后仍有任务无法按期完成"
                     : week.shortage.suggestion === "reinforcement"
                     ? "建议安排候补人员增援"
                     : week.shortage.suggestion === "overtime"
@@ -764,7 +778,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
                 <p>
                   剩余 {week.summary.remaining_hours.toFixed(2)} 标准工时。
                   {!week.active_adjustment && ` 半周判断阈值为 ${week.summary.shortage_threshold.toFixed(3)} 小时。`}
-                  {week.active_adjustment && " 系统不会把这些任务转派给其他员工；可取消本次调整后重新选择补班方式。"}
+                  {week.active_adjustment && " 整机已按优先级尝试转派和提前生产，附件已尝试由本人补做；可取消本次调整后重新选择补班方式。"}
                   {week.shortage.missing_skill_parts.length > 0 &&
                     ` 未覆盖零件：${week.shortage.missing_skill_parts.map((item) => `${item.part_code} · ${item.part_name}`).join("、")}。`}
                 </p>
@@ -970,7 +984,19 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
             </label>
             <label>
               <span>日期</span>
-              <select value={assignmentForm.work_date} onChange={(event) => setAssignmentForm({ ...assignmentForm, work_date: event.target.value })}>
+              <select value={assignmentForm.work_date} onChange={(event) => {
+                const workDate = event.target.value;
+                setAssignmentForm({
+                  ...assignmentForm,
+                  work_date: workDate,
+                  target_date:
+                    selectedAssignmentSource?.order_type === "machine"
+                      ? assignmentForm.target_date < workDate
+                        ? workDate
+                        : assignmentForm.target_date
+                      : workDate,
+                });
+              }}>
                 {week.days.map((day) => <option key={day} value={day}>{day} · {weekday(day)}</option>)}
               </select>
             </label>
@@ -979,7 +1005,21 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
                 <span>任务来源与零件</span>
                 <select value={assignmentForm.order_item_id ?? ""} onChange={(event) => {
                   const source = assignmentSources.find((item) => item.order_item_id === Number(event.target.value));
-                  if (source) setAssignmentForm({ ...assignmentForm, order_item_id: source.order_item_id, part_id: source.part_id });
+                  if (source) {
+                    const machineTarget =
+                      assignmentForm.work_date > source.start_date
+                        ? assignmentForm.work_date
+                        : source.start_date;
+                    setAssignmentForm({
+                      ...assignmentForm,
+                      order_item_id: source.order_item_id,
+                      part_id: source.part_id,
+                      target_date:
+                        source.order_type === "machine"
+                          ? machineTarget
+                          : assignmentForm.work_date,
+                    });
+                  }
                 }}>
                   {assignmentSources.map((source) => <option key={source.order_item_id} value={source.order_item_id}>{source.order_type === "machine" ? "整机" : "附件"}：{source.source_code} · {source.part_code} {source.part_name}</option>)}
                 </select>
@@ -992,11 +1032,33 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
                 </select>
               </label>
             )}
+            {selectedAssignmentSource?.order_type === "machine" && (
+              <label>
+                <span>目标完成日期</span>
+                <input
+                  type="date"
+                  min={
+                    assignmentForm.work_date >
+                    selectedAssignmentSource.start_date
+                      ? assignmentForm.work_date
+                      : selectedAssignmentSource.start_date
+                  }
+                  max={selectedAssignmentSource.end_date}
+                  value={assignmentForm.target_date}
+                  onChange={(event) =>
+                    setAssignmentForm({
+                      ...assignmentForm,
+                      target_date: event.target.value,
+                    })
+                  }
+                />
+              </label>
+            )}
             <label>
               <span>数量（整数件）</span>
               <input type="number" min="1" step="1" value={assignmentForm.quantity} onChange={(event) => setAssignmentForm({ ...assignmentForm, quantity: Math.max(1, Number(event.target.value)) })} />
             </label>
-            <p className="field-note full-field">保存时会校验员工技能、本周需求总量以及每日正常工时与加班上限。</p>
+            <p className="field-note full-field">保存时会校验员工技能、任务目标日期、本周需求总量以及每日正常工时与加班上限。</p>
             <div className="form-actions full-field">
               <button type="button" className="ghost-button" onClick={() => setAssignmentOpen(null)}>取消</button>
               <button className="primary-button" disabled={busy} type="submit">保存任务</button>
@@ -1030,7 +1092,7 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
             ))}
           </div>
           <p className="field-note">
-            选择员工后直接点击有任务的请假日期；系统会保存原确认版本，并且只让该员工本人补做原任务。
+            选择员工后点击有任务的请假日期。系统会保存原确认版本：整机任务优先当天转派给同零件的员工2、员工3，附件任务由请假员工本人补做。
           </p>
         </Modal>
       )}
@@ -1093,12 +1155,12 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
               </label>
             </div>
             <p className="field-note">
-              系统会先使用该员工本人其他日期的空余时间，再使用你允许的加班或周末；不会转派给其他员工。
+              整机任务会先在请假当天按员工优先级转派，仍不足时向前回排；附件任务先使用本人其他日期的空余时间，再使用你允许的固定加班或周末。
             </p>
             <div className="form-actions">
               <button type="button" className="ghost-button" onClick={() => setLeaveEmployee(null)}>取消</button>
               <button type="submit" className="primary-button" disabled={busy || leaveDates.length === 0}>
-                确定请假并由本人补班
+                确定请假并重新安排
               </button>
             </div>
           </form>
@@ -1223,6 +1285,10 @@ function EmployeeScheduleRow({
                     )}
                     <b>{assignment.part_code}</b>
                     <span>{assignment.part_name} × {assignment.quantity}</span>
+                    {assignment.order_type === "machine" &&
+                      assignment.target_date !== assignment.work_date && (
+                        <small>目标日 {assignment.target_date}</small>
+                      )}
                   </button>
                   {editable && <button className="remove-task" onClick={() => void onDelete(assignment)} aria-label="移除任务">×</button>}
                 </div>

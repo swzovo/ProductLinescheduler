@@ -160,8 +160,10 @@ def test_legacy_week_demands_and_assignments_migrate_to_order_sources(tmp_path, 
         assert part["is_assembly"] == 0
         source = migrated.execute("SELECT * FROM production_orders").fetchone()
         assert source["status"] == "legacy"
+        assert source["origin"] == "legacy"
         assignment = migrated.execute("SELECT * FROM assignments").fetchone()
         assert assignment["order_item_id"] is not None
+        assert assignment["target_date"] == assignment["work_date"]
         assert migrated.execute("SELECT COUNT(*) FROM week_order_demands").fetchone()[0] == 1
         assert migrated.execute("SELECT status FROM week_plans WHERE id = ?", (week_id,)).fetchone()[0] == "confirmed"
 
@@ -199,3 +201,95 @@ def test_v2_migration_creates_consistent_database_backup(tmp_path, monkeypatch):
         part = migrated.execute("SELECT * FROM parts WHERE code = 'SAFE-OLD'").fetchone()
         assert part["is_accessory"] == 1
         assert part["is_assembly"] == 0
+
+
+def test_v3_priority_constraints_expand_without_losing_employee1_and_employee2(
+    tmp_path, monkeypatch,
+):
+    path = tmp_path / "scheduler.db"
+    monkeypatch.setenv("SCHEDULER_DB_PATH", str(path))
+    database.init_db()
+    with database.transaction() as connection:
+        part_id = connection.execute(
+            "INSERT INTO parts (code, name, standard_hours) VALUES ('V3-P', '三级迁移零件', 1)"
+        ).lastrowid
+        employees = [
+            connection.execute(
+                "INSERT INTO employees (name, employee_type) VALUES (?, 'core')",
+                (f"迁移员工{level}",),
+            ).lastrowid
+            for level in (1, 2, 3)
+        ]
+        connection.execute("DROP TABLE part_employee_priorities")
+        connection.execute("DROP TABLE employee_skills")
+        connection.executescript(
+            """
+            CREATE TABLE employee_skills (
+                employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+                part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE RESTRICT,
+                priority_level INTEGER NOT NULL DEFAULT 1
+                    CHECK (priority_level IN (1, 2)),
+                PRIMARY KEY (employee_id, part_id)
+            );
+            CREATE TABLE part_employee_priorities (
+                part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+                priority_level INTEGER NOT NULL CHECK (priority_level IN (1, 2)),
+                employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+                PRIMARY KEY (part_id, priority_level),
+                UNIQUE (part_id, employee_id)
+            );
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO employee_skills
+                (employee_id, part_id, priority_level)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (employees[0], part_id, 1),
+                (employees[1], part_id, 2),
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO part_employee_priorities
+                (part_id, priority_level, employee_id)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (part_id, 1, employees[0]),
+                (part_id, 2, employees[1]),
+            ],
+        )
+
+    database.init_db()
+    with database.transaction() as migrated:
+        preserved = migrated.execute(
+            """
+            SELECT priority_level, employee_id
+            FROM part_employee_priorities
+            WHERE part_id = ?
+            ORDER BY priority_level
+            """,
+            (part_id,),
+        ).fetchall()
+        assert [
+            (row["priority_level"], row["employee_id"]) for row in preserved
+        ] == [(1, employees[0]), (2, employees[1])]
+        migrated.execute(
+            """
+            INSERT INTO employee_skills
+                (employee_id, part_id, priority_level)
+            VALUES (?, ?, 3)
+            """,
+            (employees[2], part_id),
+        )
+        migrated.execute(
+            """
+            INSERT INTO part_employee_priorities
+                (part_id, priority_level, employee_id)
+            VALUES (?, 3, ?)
+            """,
+            (part_id, employees[2]),
+        )

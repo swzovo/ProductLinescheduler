@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from .clock import generation_today
 from .scheduler import Allocation, Demand, Worker, active_dates, solve_schedule
 
 
@@ -443,14 +444,15 @@ def run_generator(
         connection.execute(
             """
             INSERT INTO assignments
-                (week_id, employee_id, part_id, work_date, quantity,
+                (week_id, employee_id, part_id, work_date, target_date, quantity,
                  standard_hours_snapshot, source)
-            VALUES (?, ?, ?, ?, ?, ?, 'generated')
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'generated')
             """,
             (
                 week_id,
                 allocation.employee_id,
                 allocation.part_id,
+                allocation.work_date,
                 allocation.work_date,
                 allocation.quantity,
                 hours_by_part[allocation.part_id],
@@ -522,6 +524,7 @@ def calculate_week(connection: sqlite3.Connection, week_id: int) -> dict[str, An
         SELECT poi.part_id, wod.order_item_id, wod.quantity,
                poi.standard_hours_snapshot, poi.is_dual_usage_snapshot,
                po.id AS production_order_id, po.order_type,
+               po.start_date, po.end_date,
                po.source_code_snapshot AS source_code,
                po.source_name_snapshot AS source_name,
                COALESCE((SELECT SUM(a.quantity) FROM assignments a
@@ -541,6 +544,8 @@ def calculate_week(connection: sqlite3.Connection, week_id: int) -> dict[str, An
                 "order_item_id": int(source["order_item_id"]),
                 "production_order_id": int(source["production_order_id"]),
                 "order_type": source["order_type"],
+                "start_date": source["start_date"],
+                "end_date": source["end_date"],
                 "is_dual_usage": bool(source["is_dual_usage_snapshot"]),
                 "source_code": source["source_code"],
                 "source_name": source["source_name"],
@@ -682,11 +687,22 @@ def calculate_week(connection: sqlite3.Connection, week_id: int) -> dict[str, An
             if source["quantity"] <= source["assigned_quantity"]:
                 continue
             if source["order_type"] == "machine":
-                source_rules_by_part[int(demand["part_id"])].extend([1, 2])
-            elif source.get("is_dual_usage"):
-                source_rules_by_part[int(demand["part_id"])].append(2)
+                source_rules_by_part[int(demand["part_id"])].extend([1, 2, 3])
             else:
-                source_rules_by_part[int(demand["part_id"])].append(None)
+                part_id = int(demand["part_id"])
+                configured_levels = sorted(
+                    {
+                        priority_level
+                        for (
+                            employee_id,
+                            priority_part_id,
+                        ), priority_level in priorities.items()
+                        if priority_part_id == part_id
+                    }
+                )
+                source_rules_by_part[part_id].extend(
+                    configured_levels or [None]
+                )
 
     def covers_remaining(employee_id: int, part_id: int) -> bool:
         if part_id not in skills.get(employee_id, set()):
@@ -934,14 +950,19 @@ def replace_assignments(
     quantity_by_part: dict[int, int] = defaultdict(int)
     quantity_by_order_item: dict[int, int] = defaultdict(int)
     load: dict[tuple[int, str], float] = defaultdict(float)
-    grouped: dict[tuple[int, int, int | None, str], int] = defaultdict(int)
-    hours_by_group: dict[tuple[int, int, int | None, str], float] = {}
+    grouped: dict[
+        tuple[int, int, int | None, str, str], int
+    ] = defaultdict(int)
+    hours_by_group: dict[
+        tuple[int, int, int | None, str, str], float
+    ] = {}
     for item in items:
         employee_id = int(item["employee_id"])
         part_id = int(item["part_id"])
         raw_order_item_id = item.get("order_item_id")
         order_item_id = int(raw_order_item_id) if raw_order_item_id is not None else None
         work_date = str(item["work_date"])
+        target_date = str(item.get("target_date") or work_date)
         quantity = int(item["quantity"])
         if employee_id not in employee_by_id:
             raise HTTPException(status_code=422, detail="员工尚未加入本周排班")
@@ -975,28 +996,64 @@ def replace_assignments(
             )
             if selected_source is None:
                 raise HTTPException(status_code=422, detail="任务来源不属于本周需求")
-            if not (selected_source["start_date"] <= work_date <= selected_source["end_date"]):
-                raise HTTPException(status_code=422, detail="手工排班日期超出生产任务日期范围")
-            priority = priorities.get((employee_id, part_id))
-            if selected_source["order_type"] == "machine" and priority not in {1, 2}:
+            if selected_source["order_type"] == "machine":
+                if not (
+                    selected_source["start_date"]
+                    <= target_date
+                    <= selected_source["end_date"]
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="整机任务目标日期超出生产任务日期范围",
+                    )
+                if (
+                    work_date > target_date
+                    or work_date < generation_today().isoformat()
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="整机任务只能在目标日或不早于系统当天的前序日期生产",
+                    )
+            elif not (
+                selected_source["start_date"]
+                <= work_date
+                <= selected_source["end_date"]
+            ):
                 raise HTTPException(
                     status_code=422,
-                    detail="整机任务只能分配给该零件配置的员工1或员工2",
+                    detail="手工排班日期超出生产任务日期范围",
+                )
+            else:
+                target_date = work_date
+            priority = priorities.get((employee_id, part_id))
+            if (
+                selected_source["order_type"] == "machine"
+                and priority not in {1, 2, 3}
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="整机任务只能分配给该零件配置的员工1、员工2或员工3",
                 )
             if (
                 selected_source["order_type"] == "accessory"
                 and bool(selected_source["is_dual_usage_snapshot"])
-                and priority != 2
+                and priority not in {1, 2, 3}
             ):
                 raise HTTPException(
                     status_code=422,
-                    detail="双用途附件订单只能分配给该零件的员工2",
+                    detail="双用途附件订单只能分配给该零件配置的员工1、员工2或员工3",
                 )
             quantity_by_order_item[order_item_id] += quantity
             item_hours = float(selected_source["source_hours"])
         else:
             item_hours = float(demand_by_id[part_id]["standard_hours_snapshot"])
-        group_key = (employee_id, part_id, order_item_id, work_date)
+        group_key = (
+            employee_id,
+            part_id,
+            order_item_id,
+            work_date,
+            target_date,
+        )
         grouped[group_key] += quantity
         hours_by_group[group_key] = item_hours
         quantity_by_part[part_id] += quantity
@@ -1030,19 +1087,26 @@ def replace_assignments(
 
     connection.execute("DELETE FROM assignments WHERE week_id = ?", (week_id,))
     for group_key, quantity in grouped.items():
-        employee_id, part_id, order_item_id, work_date = group_key
+        (
+            employee_id,
+            part_id,
+            order_item_id,
+            work_date,
+            target_date,
+        ) = group_key
         connection.execute(
             """
             INSERT INTO assignments
-                (week_id, employee_id, part_id, work_date, quantity,
+                (week_id, employee_id, part_id, work_date, target_date, quantity,
                 standard_hours_snapshot, order_item_id, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'manual')
             """,
             (
                 week_id,
                 employee_id,
                 part_id,
                 work_date,
+                target_date,
                 quantity,
                 hours_by_group[group_key],
                 order_item_id,

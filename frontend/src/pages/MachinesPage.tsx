@@ -1,8 +1,8 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { Modal } from "../components/Modal";
 import { Toast } from "../components/Toast";
-import type { Machine, Part } from "../types";
+import type { Machine, MachineBomMatrixPreview, Part } from "../types";
 
 const EMPTY_FORM = {
   code: "",
@@ -19,6 +19,12 @@ export function MachinesPage() {
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importPreview, setImportPreview] =
+    useState<MachineBomMatrixPreview | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [templatePath, setTemplatePath] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -96,6 +102,84 @@ export function MachinesPage() {
     }
   };
 
+  const openImport = () => {
+    setImportPreview(null);
+    setImportError(null);
+    setTemplatePath(null);
+    setImportOpen(true);
+  };
+
+  const saveTemplate = async () => {
+    setImportBusy(true);
+    try {
+      const result = await api<{ filename: string; path: string }>(
+        "/machines/import/template/save",
+        { method: "POST" },
+      );
+      setTemplatePath(result.path);
+    } catch (error) {
+      setMessage({ text: (error as Error).message, error: true });
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const previewImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImportBusy(true);
+    setImportPreview(null);
+    setImportError(null);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      setImportPreview(
+        await api<MachineBomMatrixPreview>("/machines/import/preview", {
+          method: "POST",
+          body,
+        }),
+      );
+    } catch (error) {
+      setImportError((error as Error).message);
+    } finally {
+      setImportBusy(false);
+      event.target.value = "";
+    }
+  };
+
+  const commitImport = async () => {
+    if (!importPreview || importPreview.invalid_count > 0) return;
+    setImportBusy(true);
+    try {
+      const result = await api<{ created: number; updated: number }>(
+        "/machines/import/commit",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            machines: importPreview.machines.map((machine) => ({
+              code: machine.code,
+              name: machine.name,
+              bom_items: machine.bom_items.map((item) => ({
+                part_id: item.part_id,
+                quantity_per_machine: item.quantity_per_machine,
+              })),
+            })),
+          }),
+        },
+      );
+      setImportOpen(false);
+      setImportPreview(null);
+      await load();
+      setMessage({
+        text: `整机BOM导入完成：新增 ${result.created} 项，更新 ${result.updated} 项`,
+      });
+    } catch (error) {
+      setMessage({ text: (error as Error).message, error: true });
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
   return (
     <>
       <section className="section-heading">
@@ -104,7 +188,10 @@ export function MachinesPage() {
           <h2>整机与零件清单</h2>
           <p>维护整机编号和每台所需零件；生产任务会保存创建时的BOM快照。</p>
         </div>
-        <button className="primary-button" onClick={() => open()}><span>＋</span> 新增整机</button>
+        <div className="heading-actions">
+          <button className="secondary-button" onClick={openImport}>导入BOM矩阵</button>
+          <button className="primary-button" onClick={() => open()}><span>＋</span> 新增整机</button>
+        </div>
       </section>
 
       <section className="panel">
@@ -168,7 +255,65 @@ export function MachinesPage() {
             </div>
             <label className="check-field"><input type="checkbox" checked={form.active} onChange={(event) => setForm({ ...form, active: event.target.checked })} /><span>启用该整机</span></label>
             <div className="form-actions"><button type="button" className="ghost-button" onClick={() => setEditing(null)}>取消</button><button className="primary-button" type="submit">保存整机</button></div>
+            {editing === "new" && (
+              <button type="button" className="text-button" onClick={() => {
+                setEditing(null);
+                openImport();
+              }}>需要一次新增多个机型？改用BOM矩阵导入</button>
+            )}
           </form>
+        </Modal>
+      )}
+      {importOpen && (
+        <Modal title="导入整机BOM矩阵" width="980px" onClose={() => !importBusy && setImportOpen(false)}>
+          <div className="import-guide">
+            <div>
+              <strong>按“零件行 × 整机列”完整更新BOM</strong>
+              <p>第一行为整机编号，第二行为整机名称；Y表示每台1件，也可填写正整数用量。已有整机将完整替换BOM。</p>
+            </div>
+            <button type="button" className="secondary-button" disabled={importBusy} onClick={() => void saveTemplate()}>
+              下载Excel模板
+            </button>
+          </div>
+          {templatePath && <div className="template-save-success"><strong>模板保存成功</strong><span>{templatePath}</span></div>}
+          <label className="file-drop">
+            <input type="file" accept=".xlsx" disabled={importBusy} onChange={previewImport} />
+            <span>{importBusy ? "正在读取并校验…" : "选择 .xlsx 文件"}</span>
+            <small>零件必须已启用并具备“整机装配”用途</small>
+          </label>
+          {importError && <div className="import-format-error" role="alert"><strong>表格格式有误</strong><p>{importError}</p></div>}
+          {importPreview && (
+            <>
+              <div className="import-summary">
+                <span>整机 <b>{importPreview.total_machines}</b> 项</span>
+                <span className="success-text">可导入 <b>{importPreview.valid_count}</b></span>
+                <span className={importPreview.invalid_count ? "danger-text" : ""}>错误 <b>{importPreview.invalid_count}</b></span>
+              </div>
+              <div className="table-wrap import-preview-table">
+                <table>
+                  <thead><tr><th>列</th><th>处理</th><th>整机编号</th><th>整机名称</th><th>BOM零件数</th><th>校验结果</th></tr></thead>
+                  <tbody>
+                    {importPreview.machines.map((machine) => (
+                      <tr key={`${machine.column}-${machine.code}`} className={machine.errors.length ? "error-row" : ""}>
+                        <td>{machine.column}</td>
+                        <td>{machine.action === "create" ? "新增" : "完整更新"}</td>
+                        <td><span className="code-chip">{machine.code || "—"}</span></td>
+                        <td>{machine.name || "—"}</td>
+                        <td>{machine.bom_items.length}</td>
+                        <td>{machine.errors.length ? <span className="danger-text">{machine.errors.join("；")}</span> : <span className="success-text">校验通过</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="form-actions">
+                <button type="button" className="ghost-button" onClick={() => setImportOpen(false)}>取消</button>
+                <button type="button" className="primary-button" disabled={importBusy || importPreview.invalid_count > 0} onClick={() => void commitImport()}>
+                  {importPreview.invalid_count ? "请先修正表格错误" : `确认导入 ${importPreview.valid_count} 个整机`}
+                </button>
+              </div>
+            </>
+          )}
         </Modal>
       )}
       {message && <Toast message={message.text} kind={message.error ? "error" : "success"} onClose={() => setMessage(null)} />}

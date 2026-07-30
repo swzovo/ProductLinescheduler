@@ -115,13 +115,13 @@ CREATE TABLE IF NOT EXISTS employees (
 CREATE TABLE IF NOT EXISTS employee_skills (
     employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
     part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE RESTRICT,
-    priority_level INTEGER NOT NULL DEFAULT 1 CHECK (priority_level IN (1, 2)),
+    priority_level INTEGER NOT NULL DEFAULT 1 CHECK (priority_level IN (1, 2, 3)),
     PRIMARY KEY (employee_id, part_id)
 );
 
 CREATE TABLE IF NOT EXISTS part_employee_priorities (
     part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
-    priority_level INTEGER NOT NULL CHECK (priority_level IN (1, 2)),
+    priority_level INTEGER NOT NULL CHECK (priority_level IN (1, 2, 3)),
     employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
     PRIMARY KEY (part_id, priority_level),
     UNIQUE (part_id, employee_id)
@@ -195,6 +195,9 @@ CREATE TABLE IF NOT EXISTS production_orders (
     needs_generation INTEGER NOT NULL DEFAULT 1,
     source_code_snapshot TEXT NOT NULL,
     source_name_snapshot TEXT NOT NULL,
+    origin TEXT NOT NULL DEFAULT 'manual'
+        CHECK (origin IN ('manual', 'accessory_import', 'machine_plan_import', 'legacy')),
+    import_week_start TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -225,12 +228,13 @@ CREATE TABLE IF NOT EXISTS assignments (
     employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
     part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE RESTRICT,
     work_date TEXT NOT NULL,
+    target_date TEXT NOT NULL,
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     standard_hours_snapshot REAL NOT NULL,
     order_item_id INTEGER REFERENCES production_order_items(id) ON DELETE RESTRICT,
     source TEXT NOT NULL DEFAULT 'generated'
         CHECK (source IN ('generated', 'manual')),
-    UNIQUE (week_id, employee_id, order_item_id, work_date)
+    UNIQUE (week_id, employee_id, order_item_id, work_date, target_date)
 );
 
 CREATE TABLE IF NOT EXISTS overtime_approvals (
@@ -347,13 +351,61 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS part_employee_priorities (
                 part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
-                priority_level INTEGER NOT NULL CHECK (priority_level IN (1, 2)),
+                priority_level INTEGER NOT NULL CHECK (priority_level IN (1, 2, 3)),
                 employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
                 PRIMARY KEY (part_id, priority_level),
                 UNIQUE (part_id, employee_id)
             )
             """
         )
+        skill_sql = str(
+            connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'employee_skills'"
+            ).fetchone()["sql"]
+        )
+        if "IN (1, 2, 3)" not in skill_sql:
+            connection.executescript(
+                """
+                CREATE TABLE employee_skills_v3 (
+                    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+                    part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE RESTRICT,
+                    priority_level INTEGER NOT NULL DEFAULT 1
+                        CHECK (priority_level IN (1, 2, 3)),
+                    PRIMARY KEY (employee_id, part_id)
+                );
+                INSERT INTO employee_skills_v3
+                    (employee_id, part_id, priority_level)
+                SELECT employee_id, part_id, priority_level
+                FROM employee_skills;
+                DROP TABLE employee_skills;
+                ALTER TABLE employee_skills_v3 RENAME TO employee_skills;
+                """
+            )
+        priority_sql = str(
+            connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'part_employee_priorities'"
+            ).fetchone()["sql"]
+        )
+        if "IN (1, 2, 3)" not in priority_sql:
+            connection.executescript(
+                """
+                CREATE TABLE part_employee_priorities_v3 (
+                    part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE CASCADE,
+                    priority_level INTEGER NOT NULL
+                        CHECK (priority_level IN (1, 2, 3)),
+                    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+                    PRIMARY KEY (part_id, priority_level),
+                    UNIQUE (part_id, employee_id)
+                );
+                INSERT INTO part_employee_priorities_v3
+                    (part_id, priority_level, employee_id)
+                SELECT part_id, priority_level, employee_id
+                FROM part_employee_priorities;
+                DROP TABLE part_employee_priorities;
+                ALTER TABLE part_employee_priorities_v3
+                    RENAME TO part_employee_priorities;
+                """
+            )
         if not connection.execute(
             "SELECT 1 FROM part_employee_priorities LIMIT 1"
         ).fetchone():
@@ -552,6 +604,45 @@ def init_db() -> None:
                 """
             )
             connection.execute("DROP TABLE assignments_before_orders")
+        assignment_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(assignments)").fetchall()
+        }
+        if "target_date" not in assignment_columns:
+            connection.execute(
+                "ALTER TABLE assignments RENAME TO assignments_before_target_date"
+            )
+            connection.execute(
+                """
+                CREATE TABLE assignments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    week_id INTEGER NOT NULL REFERENCES week_plans(id) ON DELETE CASCADE,
+                    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+                    part_id INTEGER NOT NULL REFERENCES parts(id) ON DELETE RESTRICT,
+                    work_date TEXT NOT NULL,
+                    target_date TEXT NOT NULL,
+                    quantity INTEGER NOT NULL CHECK (quantity > 0),
+                    standard_hours_snapshot REAL NOT NULL,
+                    order_item_id INTEGER REFERENCES production_order_items(id) ON DELETE RESTRICT,
+                    source TEXT NOT NULL DEFAULT 'generated'
+                        CHECK (source IN ('generated', 'manual')),
+                    UNIQUE (
+                        week_id, employee_id, order_item_id, work_date, target_date
+                    )
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO assignments
+                    (id, week_id, employee_id, part_id, work_date, target_date,
+                     quantity, standard_hours_snapshot, order_item_id, source)
+                SELECT id, week_id, employee_id, part_id, work_date, work_date,
+                       quantity, standard_hours_snapshot, order_item_id, source
+                FROM assignments_before_target_date
+                """
+            )
+            connection.execute("DROP TABLE assignments_before_target_date")
         order_columns = {
             str(row["name"])
             for row in connection.execute("PRAGMA table_info(production_orders)").fetchall()
@@ -559,6 +650,17 @@ def init_db() -> None:
         if "needs_generation" not in order_columns:
             connection.execute(
                 "ALTER TABLE production_orders ADD COLUMN needs_generation INTEGER NOT NULL DEFAULT 0"
+            )
+        if "origin" not in order_columns:
+            connection.execute(
+                "ALTER TABLE production_orders ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
+            )
+            connection.execute(
+                "UPDATE production_orders SET origin = 'legacy' WHERE status = 'legacy'"
+            )
+        if "import_week_start" not in order_columns:
+            connection.execute(
+                "ALTER TABLE production_orders ADD COLUMN import_week_start TEXT"
             )
         order_item_columns = {
             str(row["name"])
@@ -606,8 +708,9 @@ def init_db() -> None:
                 """
                 INSERT INTO production_orders
                     (order_type, accessory_part_id, quantity, start_date, end_date,
-                     status, needs_generation, source_code_snapshot, source_name_snapshot)
-                VALUES ('accessory', ?, ?, ?, ?, 'legacy', 0, ?, ?)
+                     status, needs_generation, source_code_snapshot,
+                     source_name_snapshot, origin)
+                VALUES ('accessory', ?, ?, ?, ?, 'legacy', 0, ?, ?, 'legacy')
                 """,
                 (
                     demand["part_id"], demand["quantity"], start.isoformat(),

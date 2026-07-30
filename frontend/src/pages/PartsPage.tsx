@@ -11,6 +11,7 @@ const EMPTY_FORM = {
   usage_types: ["accessory"] as ("accessory" | "assembly")[],
   level_1_employee_id: null as number | null,
   level_2_employee_id: null as number | null,
+  level_3_employee_id: null as number | null,
   active: true,
 };
 
@@ -30,7 +31,11 @@ export function PartsPage() {
   const [templateBusy, setTemplateBusy] = useState(false);
   const [templatePath, setTemplatePath] = useState<string | null>(null);
   const [deleteAllBusy, setDeleteAllBusy] = useState(false);
-  const [employeeSearch, setEmployeeSearch] = useState({ 1: "", 2: "" });
+  const [employeeSearch, setEmployeeSearch] = useState({
+    1: "",
+    2: "",
+    3: "",
+  });
 
   const load = async () => {
     setLoading(true);
@@ -62,13 +67,14 @@ export function PartsPage() {
         usage_types: part.usage_types?.length ? part.usage_types : ["accessory"],
         level_1_employee_id: part.level_1_employee_id ?? null,
         level_2_employee_id: part.level_2_employee_id ?? null,
+        level_3_employee_id: part.level_3_employee_id ?? null,
         active: part.active,
       });
     } else {
       setEditing("new");
       setForm(EMPTY_FORM);
     }
-    setEmployeeSearch({ 1: "", 2: "" });
+    setEmployeeSearch({ 1: "", 2: "", 3: "" });
   };
 
   const save = async (event: FormEvent) => {
@@ -207,6 +213,7 @@ export function PartsPage() {
               employee_names: row.employee_names,
               employee_level1_names: row.employee_level1_names,
               employee_level2_names: row.employee_level2_names,
+              employee_level3_names: row.employee_level3_names,
             })),
           }),
         },
@@ -224,12 +231,25 @@ export function PartsPage() {
     }
   };
 
-  const priorityEmployees = (level: 1 | 2) => {
+  const priorityField = (level: 1 | 2 | 3) =>
+    `level_${level}_employee_id` as
+      | "level_1_employee_id"
+      | "level_2_employee_id"
+      | "level_3_employee_id";
+
+  const priorityEmployees = (level: 1 | 2 | 3) => {
     const query = employeeSearch[level].trim().toLocaleLowerCase("zh-CN");
-    const otherId =
-      level === 1 ? form.level_2_employee_id : form.level_1_employee_id;
+    const selectedByOtherLevel = new Set(
+      ([1, 2, 3] as const)
+        .filter((item) => item !== level)
+        .map((item) => form[priorityField(item)])
+        .filter((item): item is number => item !== null),
+    );
     return employees
-      .filter((employee) => employee.active && employee.id !== otherId)
+      .filter(
+        (employee) =>
+          employee.active && !selectedByOtherLevel.has(employee.id),
+      )
       .filter(
         (employee) =>
           !query || employee.name.toLocaleLowerCase("zh-CN").includes(query),
@@ -288,6 +308,7 @@ export function PartsPage() {
                   <th>零件用途</th>
                   <th>员工1</th>
                   <th>员工2</th>
+                  <th>员工3</th>
                   <th>状态</th>
                   <th className="align-right">操作</th>
                 </tr>
@@ -307,6 +328,7 @@ export function PartsPage() {
                     </td>
                     <td>{part.level_1_employee?.employee_name ?? "—"}</td>
                     <td>{part.level_2_employee?.employee_name ?? "—"}</td>
+                    <td>{part.level_3_employee?.employee_name ?? "—"}</td>
                     <td>
                       <span className={`status-pill ${part.active ? "ready" : "inactive"}`}>
                         {part.active ? "启用" : "已停用"}
@@ -396,16 +418,14 @@ export function PartsPage() {
               ))}
             </fieldset>
             <fieldset className="full-field priority-picker">
-              <legend>整机任务优先员工</legend>
+              <legend>零件排产优先员工</legend>
               <p className="field-note">
-                每级最多一人。整机每天先使用员工1，再使用员工2；双用途附件只能由员工2完成。
+                每级最多一人。整机先于附件占用产能；两类任务都依次使用员工1、员工2、员工3。
               </p>
               <div className="priority-picker-grid">
-                {([1, 2] as const).map((level) => {
-                  const selectedId =
-                    level === 1
-                      ? form.level_1_employee_id
-                      : form.level_2_employee_id;
+                {([1, 2, 3] as const).map((level) => {
+                  const field = priorityField(level);
+                  const selectedId = form[field];
                   return (
                     <div className="priority-picker-column" key={level}>
                       <strong>员工{level}</strong>
@@ -428,9 +448,7 @@ export function PartsPage() {
                           onClick={() =>
                             setForm({
                               ...form,
-                              [level === 1
-                                ? "level_1_employee_id"
-                                : "level_2_employee_id"]: null,
+                              [field]: null,
                             })
                           }
                         >
@@ -444,9 +462,7 @@ export function PartsPage() {
                             onClick={() =>
                               setForm({
                                 ...form,
-                                [level === 1
-                                  ? "level_1_employee_id"
-                                  : "level_2_employee_id"]: employee.id,
+                                [field]: employee.id,
                               })
                             }
                           >
@@ -490,7 +506,7 @@ export function PartsPage() {
           <div className="import-guide">
             <div>
               <strong>使用 Excel 或 CSV 批量维护零件</strong>
-              <p>同编号零件会标记为更新；“员工1、员工2”每格各填一名员工，留空表示不配置。</p>
+              <p>同编号零件会标记为更新；“员工1、员工2、员工3”每格各填一名员工，留空表示不配置。</p>
             </div>
             <button
               type="button"
@@ -563,6 +579,7 @@ export function PartsPage() {
                       <th>零件用途</th>
                       <th>员工1</th>
                       <th>员工2</th>
+                      <th>员工3</th>
                       <th>状态 / 校验结果</th>
                     </tr>
                   </thead>
@@ -581,6 +598,7 @@ export function PartsPage() {
                         <td>{(row.usage_types ?? ["accessory"]).map((usage) => usage === "accessory" ? "附件" : "整机装配").join(" + ")}</td>
                         <td>{row.employee_level1_names?.[0] ?? row.employee_names?.[0] ?? "—"}</td>
                         <td>{row.employee_level2_names?.[0] ?? row.employee_names?.[1] ?? "—"}</td>
+                        <td>{row.employee_level3_names?.[0] ?? row.employee_names?.[2] ?? "—"}</td>
                         <td>
                           {row.errors.length ? (
                             <span className="danger-text">{row.errors.join("；")}</span>

@@ -307,7 +307,13 @@ def _schedule_pages(week: dict[str, Any]) -> list[Image.Image]:
                     if assignment.get("order_type") == "machine"
                     else "附件 " if assignment.get("order_type") == "accessory" else ""
                 )
-                task_text = f"{source}{assignment['part_code']} × {assignment['quantity']}  {assignment['part_name']}"
+                target_hint = (
+                    f" [目标{assignment['target_date']}]"
+                    if assignment.get("target_date")
+                    and assignment["target_date"] != assignment["work_date"]
+                    else ""
+                )
+                task_text = f"{source}{assignment['part_code']} × {assignment['quantity']}  {assignment['part_name']}{target_hint}"
                 draw.text(
                     (x + 12, task_y),
                     _fit_text(draw, task_text, font(15), day_width - 24),
@@ -454,13 +460,14 @@ def _assignment_pages(week: dict[str, Any]) -> list[Image.Image]:
     image = _new_page(week, "任务分配清单")
     draw = ImageDraw.Draw(image)
     columns = [
-        ("日期", 260),
-        ("员工", 260),
-        ("来源", 260),
-        ("零件编号", 330),
-        ("零件名称", 500),
-        ("数量", 180),
-        ("标准工时", 270),
+        ("生产日", 220),
+        ("目标日", 220),
+        ("员工", 240),
+        ("来源", 250),
+        ("零件编号", 290),
+        ("零件名称", 450),
+        ("数量", 160),
+        ("标准工时", 230),
     ]
     y = _draw_table_header(draw, BODY_TOP, columns)
     row_height = 52
@@ -477,6 +484,7 @@ def _assignment_pages(week: dict[str, Any]) -> list[Image.Image]:
         total_hours = assignment["standard_hours"]
         values = [
             assignment["work_date"],
+            assignment.get("target_date") or assignment["work_date"],
             assignment["employee_name"],
             (
                 f"整机：{assignment.get('source_code')}"

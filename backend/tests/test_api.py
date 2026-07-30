@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
+from xml.sax.saxutils import escape
+import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,10 +11,84 @@ from fastapi.testclient import TestClient
 from backend.app.main import app
 
 
+def make_xlsx(rows: list[list[object]]) -> bytes:
+    """构造测试用的最小xlsx，避免测试套件额外依赖Excel库。"""
+
+    def column_name(index: int) -> str:
+        result = ""
+        value = index + 1
+        while value:
+            value, remainder = divmod(value - 1, 26)
+            result = chr(65 + remainder) + result
+        return result
+
+    xml_rows: list[str] = []
+    for row_index, row in enumerate(rows, start=1):
+        cells: list[str] = []
+        for column_index, value in enumerate(row):
+            if value is None or value == "":
+                continue
+            reference = f"{column_name(column_index)}{row_index}"
+            if isinstance(value, (int, float)):
+                cells.append(f'<c r="{reference}"><v>{value}</v></c>')
+            elif isinstance(value, str) and value.startswith("="):
+                cells.append(
+                    f'<c r="{reference}"><f>{escape(value[1:])}</f><v>1</v></c>'
+                )
+            else:
+                cells.append(
+                    f'<c r="{reference}" t="inlineStr"><is><t>{escape(str(value))}</t></is></c>'
+                )
+        xml_rows.append(
+            f'<row r="{row_index}">{"".join(cells)}</row>'
+        )
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<sheetData>{"".join(xml_rows)}</sheetData></worksheet>'
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            "</Types>",
+        )
+        archive.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            "</Relationships>",
+        )
+        archive.writestr(
+            "xl/workbook.xml",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        )
+        archive.writestr(
+            "xl/_rels/workbook.xml.rels",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            "</Relationships>",
+        )
+        archive.writestr("xl/worksheets/sheet1.xml", sheet)
+    return buffer.getvalue()
+
+
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SCHEDULER_DB_PATH", str(tmp_path / "scheduler.db"))
     monkeypatch.setenv("SCHEDULER_DOWNLOAD_DIR", str(tmp_path / "Downloads"))
+    monkeypatch.setenv("SCHEDULER_TODAY", "2026-07-20")
     with TestClient(app) as test_client:
         yield test_client
 
@@ -854,7 +931,7 @@ def test_part_import_rejects_duplicate_rows_and_serves_template(client: TestClie
     assert "没有零件数据" in empty_template.json()["detail"]
 
 
-def test_part_import_supports_employee1_employee2_and_reports_conflicts(
+def test_part_import_supports_three_employee_levels_and_reports_conflicts(
     client: TestClient,
 ):
     valid = client.post(
@@ -863,8 +940,8 @@ def test_part_import_supports_employee1_employee2_and_reports_conflicts(
             "file": (
                 "priority.csv",
                 (
-                    "零件编号,零件名称,单件标准工时（小时）,员工1,员工2\n"
-                    "PRI-IMPORT,优先导入件,0.5,主员工,次员工\n"
+                    "零件编号,零件名称,单件标准工时（小时）,员工1,员工2,员工3\n"
+                    "PRI-IMPORT,优先导入件,0.5,主员工,次员工,三级员工\n"
                 ).encode(),
                 "text/csv",
             )
@@ -873,6 +950,7 @@ def test_part_import_supports_employee1_employee2_and_reports_conflicts(
     assert valid["invalid_count"] == 0
     assert valid["rows"][0]["employee_level1_names"] == ["主员工"]
     assert valid["rows"][0]["employee_level2_names"] == ["次员工"]
+    assert valid["rows"][0]["employee_level3_names"] == ["三级员工"]
 
     conflict = client.post(
         "/api/parts/import/preview",
@@ -880,8 +958,8 @@ def test_part_import_supports_employee1_employee2_and_reports_conflicts(
             "file": (
                 "priority-error.csv",
                 (
-                    "零件编号,零件名称,单件标准工时（小时）,员工1,员工2\n"
-                    "PRI-ERROR,错误优先件,0.5,同一员工,同一员工\n"
+                    "零件编号,零件名称,单件标准工时（小时）,员工1,员工2,员工3\n"
+                    "PRI-ERROR,错误优先件,0.5,同一员工,次员工,同一员工\n"
                 ).encode(),
                 "text/csv",
             )
@@ -1039,8 +1117,15 @@ def test_machine_bom_snapshot_and_balanced_cross_week_schedule(client: TestClien
     assert accessory.status_code == 201
     client.post("/api/production-orders/generate")
     mixed = client.get(f"/api/weeks/{week_id}").json()
-    assert {item["order_type"] for item in mixed["assignments"]} == {"machine"}
-    assert mixed["summary"]["remaining_hours"] == 2
+    assert {item["order_type"] for item in mixed["assignments"]} == {
+        "machine", "accessory"
+    }
+    assert {
+        item["employee_id"]
+        for item in mixed["assignments"]
+        if item["order_type"] == "accessory"
+    } == {employee_id}
+    assert mixed["summary"]["remaining_hours"] == 0
     assert len(mixed["demands"][0]["sources"]) == 2
 
 
@@ -1153,7 +1238,7 @@ def test_cross_week_reinforcement_only_takes_accessory_remainder(
     )
 
 
-def test_accessory_is_balanced_between_equally_loaded_skilled_employees(
+def test_accessory_uses_employee1_capacity_before_employee2(
     client: TestClient,
 ):
     part_id = create_part(client, code="ACCESSORY-BALANCE", hours=1)
@@ -1182,11 +1267,50 @@ def test_accessory_is_balanced_between_equally_loaded_skilled_employees(
         )
         for employee_id in (first_id, second_id)
     }
-    assert quantities == {first_id: 5, second_id: 5}
+    assert quantities == {first_id: 6, second_id: 4}
     assert {item["work_date"] for item in detail["assignments"]} == {"2026-07-20"}
 
 
-def test_accessory_prefers_employee_with_lower_existing_load(client: TestClient):
+def test_accessory_stays_with_employee1_when_period_capacity_is_sufficient(
+    client: TestClient,
+):
+    part_id = create_part(client, code="ACCESSORY-EMPLOYEE1", hours=1)
+    first_id = create_employee(client, "附件员工1", "core", [part_id])
+    second_id = create_employee(client, "附件员工2", "core", [part_id])
+    client.post(
+        "/api/production-orders",
+        json={
+            "order_type": "accessory",
+            "source_id": part_id,
+            "quantity": 10,
+            "start_date": "2026-07-20",
+            "end_date": "2026-07-21",
+        },
+    )
+
+    week_id = client.post(
+        "/api/production-orders/generate"
+    ).json()["affected_week_ids"][0]
+    detail = client.get(f"/api/weeks/{week_id}").json()
+    quantities = {
+        employee_id: sum(
+            item["quantity"]
+            for item in detail["assignments"]
+            if item["employee_id"] == employee_id
+        )
+        for employee_id in (first_id, second_id)
+    }
+    assert quantities == {first_id: 10, second_id: 0}
+    assert {
+        item["work_date"]
+        for item in detail["assignments"]
+        if item["employee_id"] == first_id
+    } == {"2026-07-20", "2026-07-21"}
+
+
+def test_accessory_uses_employee1_remaining_capacity_before_employee2(
+    client: TestClient,
+):
     accessory = client.post(
         "/api/parts",
         json={
@@ -1263,8 +1387,8 @@ def test_accessory_prefers_employee_with_lower_existing_load(client: TestClient)
         employee["id"]: employee["week_assigned_hours"]
         for employee in detail["employees"]
     }
-    assert accessory_quantities == {busy_id: 1, idle_id: 5}
-    assert total_hours[busy_id] == total_hours[idle_id] == 5
+    assert accessory_quantities == {busy_id: 2, idle_id: 4}
+    assert total_hours == {busy_id: 6, idle_id: 4}
 
 
 def test_machine_remainder_is_spread_and_order_hour_snapshots_stay_exact(client: TestClient):
@@ -1339,8 +1463,8 @@ def test_machine_remainder_is_spread_and_order_hour_snapshots_stay_exact(client:
     )
     assert source_hours == [1, 2]
     assert detail["summary"]["total_required_hours"] == 9
-    assert detail["summary"]["scheduled_hours"] == 7
-    assert detail["summary"]["remaining_hours"] == 2
+    assert detail["summary"]["scheduled_hours"] == 9
+    assert detail["summary"]["remaining_hours"] == 0
 
 
 def test_machine_uses_employee1_before_employee2_and_keeps_daily_targets(
@@ -1413,7 +1537,9 @@ def test_machine_uses_employee1_before_employee2_and_keeps_daily_targets(
     ] == [8, 8, 8, 8, 8, 0, 0]
 
 
-def test_dual_usage_accessory_is_employee2_only_after_machine(client: TestClient):
+def test_dual_usage_accessory_uses_employee1_remainder_then_employee2(
+    client: TestClient,
+):
     part = client.post(
         "/api/parts",
         json={
@@ -1471,10 +1597,22 @@ def test_dual_usage_accessory_is_employee2_only_after_machine(client: TestClient
         "/api/production-orders/generate"
     ).json()["affected_week_ids"][0]
     detail = client.get(f"/api/weeks/{week_id}").json()
-    assert {
-        (assignment["order_type"], assignment["employee_id"])
-        for assignment in detail["assignments"]
-    } == {("machine", employee1), ("accessory", employee2)}
+    quantities = {
+        (order_type, employee_id): sum(
+            assignment["quantity"]
+            for assignment in detail["assignments"]
+            if assignment["order_type"] == order_type
+            and assignment["employee_id"] == employee_id
+        )
+        for order_type in ("machine", "accessory")
+        for employee_id in (employee1, employee2)
+    }
+    assert quantities == {
+        ("machine", employee1): 5,
+        ("machine", employee2): 0,
+        ("accessory", employee1): 1,
+        ("accessory", employee2): 3,
+    }
 
 
 def test_fixed_four_hour_overtime_uses_latest_dates_first(client: TestClient):
@@ -1713,7 +1851,12 @@ def test_confirmed_leave_merges_into_existing_same_order_task(
         assignment["quantity"]
         for assignment in detail["assignments"]
         if assignment["employee_id"] == employee_id
-    ) == 2
+    ) == 1
+    assert any(
+        assignment["target_date"] != assignment["work_date"]
+        for assignment in detail["assignments"]
+        if assignment["employee_id"] == employee_id
+    )
 
 
 def test_data_maintenance_clears_cache_and_schedule_history_but_keeps_master_data(
@@ -1750,3 +1893,461 @@ def test_data_maintenance_clears_cache_and_schedule_history_but_keeps_master_dat
     assert client.get("/api/weeks").json() == []
     assert any(item["id"] == part_id for item in client.get("/api/parts").json())
     assert any(item["id"] == employee_id for item in client.get("/api/employees").json())
+
+
+def test_employee3_priority_and_machine_target_day_backfill(client: TestClient):
+    part = client.post(
+        "/api/parts",
+        json={
+            "code": "LEVEL-3-MACHINE",
+            "name": "三级整机零件",
+            "standard_hours": 1,
+            "usage_types": ["assembly"],
+            "active": True,
+        },
+    ).json()
+    employee_ids = [
+        create_employee(client, f"整机员工{level}", "core", [part["id"]])
+        for level in (1, 2, 3)
+    ]
+    updated = client.put(
+        f"/api/parts/{part['id']}",
+        json={
+            "code": part["code"],
+            "name": part["name"],
+            "standard_hours": 1,
+            "usage_types": ["assembly"],
+            "level_1_employee_id": employee_ids[0],
+            "level_2_employee_id": employee_ids[1],
+            "level_3_employee_id": employee_ids[2],
+            "active": True,
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["level_3_employee"]["employee_name"] == "整机员工3"
+
+    machine = client.post(
+        "/api/machines",
+        json={
+            "code": "LEVEL-3-M",
+            "name": "三级整机",
+            "active": True,
+            "bom_items": [{"part_id": part["id"], "quantity_per_machine": 1}],
+        },
+    ).json()
+    client.post(
+        "/api/production-orders",
+        json={
+            "order_type": "machine",
+            "source_id": machine["id"],
+            "quantity": 20,
+            "start_date": "2026-07-22",
+            "end_date": "2026-07-22",
+        },
+    )
+    week_id = client.post(
+        "/api/production-orders/generate"
+    ).json()["affected_week_ids"][0]
+    detail = client.get(f"/api/weeks/{week_id}").json()
+
+    target_day = [
+        assignment
+        for assignment in detail["assignments"]
+        if assignment["work_date"] == "2026-07-22"
+    ]
+    assert {
+        employee_id: sum(
+            assignment["quantity"]
+            for assignment in target_day
+            if assignment["employee_id"] == employee_id
+        )
+        for employee_id in employee_ids
+    } == {
+        employee_ids[0]: 6,
+        employee_ids[1]: 6,
+        employee_ids[2]: 6,
+    }
+    earlier = [
+        assignment
+        for assignment in detail["assignments"]
+        if assignment["work_date"] != "2026-07-22"
+    ]
+    assert len(earlier) == 1
+    assert earlier[0]["work_date"] == "2026-07-21"
+    assert earlier[0]["employee_id"] == employee_ids[0]
+    assert earlier[0]["quantity"] == 2
+    assert earlier[0]["target_date"] == "2026-07-22"
+    assert all(
+        assignment["work_date"] >= "2026-07-20"
+        for assignment in detail["assignments"]
+    )
+
+    preserved = client.put(
+        f"/api/weeks/{week_id}/assignments",
+        json={
+            "assignments": [
+                {
+                    "employee_id": assignment["employee_id"],
+                    "part_id": assignment["part_id"],
+                    "order_item_id": assignment["order_item_id"],
+                    "work_date": assignment["work_date"],
+                    "target_date": assignment["target_date"],
+                    "quantity": assignment["quantity"],
+                }
+                for assignment in detail["assignments"]
+            ]
+        },
+    )
+    assert preserved.status_code == 200
+    assert any(
+        assignment["work_date"] == "2026-07-21"
+        and assignment["target_date"] == "2026-07-22"
+        for assignment in preserved.json()["assignments"]
+    )
+
+
+def test_accessory_uses_three_priority_levels_across_whole_period(
+    client: TestClient,
+):
+    part_id = create_part(client, code="LEVEL-3-ACCESSORY", hours=1)
+    employee_ids = [
+        create_employee(client, f"附件三级员工{level}", "core", [part_id])
+        for level in (1, 2, 3)
+    ]
+    part = client.get("/api/parts").json()[0]
+    response = client.put(
+        f"/api/parts/{part_id}",
+        json={
+            "code": part["code"],
+            "name": part["name"],
+            "standard_hours": 1,
+            "usage_types": ["accessory"],
+            "level_1_employee_id": employee_ids[0],
+            "level_2_employee_id": employee_ids[1],
+            "level_3_employee_id": employee_ids[2],
+            "active": True,
+        },
+    )
+    assert response.status_code == 200
+    client.post(
+        "/api/production-orders",
+        json={
+            "order_type": "accessory",
+            "source_id": part_id,
+            "quantity": 40,
+            "start_date": "2026-07-20",
+            "end_date": "2026-07-22",
+        },
+    )
+    week_id = client.post(
+        "/api/production-orders/generate"
+    ).json()["affected_week_ids"][0]
+    detail = client.get(f"/api/weeks/{week_id}").json()
+    quantities = {
+        employee_id: sum(
+            assignment["quantity"]
+            for assignment in detail["assignments"]
+            if assignment["employee_id"] == employee_id
+        )
+        for employee_id in employee_ids
+    }
+    assert quantities == {
+        employee_ids[0]: 18,
+        employee_ids[1]: 18,
+        employee_ids[2]: 4,
+    }
+
+
+def test_machine_bom_matrix_preview_commit_and_atomic_errors(
+    client: TestClient,
+):
+    assembly_a = client.post(
+        "/api/parts",
+        json={
+            "code": "BOM-A",
+            "name": "装配件A",
+            "standard_hours": 0.5,
+            "usage_types": ["assembly"],
+            "active": True,
+        },
+    ).json()
+    assembly_b = client.post(
+        "/api/parts",
+        json={
+            "code": "BOM-B",
+            "name": "装配件B",
+            "standard_hours": 0.25,
+            "usage_types": ["assembly"],
+            "active": True,
+        },
+    ).json()
+    content = make_xlsx(
+        [
+            ["料号", "描述", "MATRIX-A", "MATRIX-B"],
+            ["", "", "矩阵整机A", "矩阵整机B"],
+            ["BOM-A", "装配件A", "Y", 2],
+            ["BOM-B", "装配件B", "", "√"],
+        ]
+    )
+    preview_response = client.post(
+        "/api/machines/import/preview",
+        files={
+            "file": (
+                "整机BOM.xlsx",
+                content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["valid_count"] == 2
+    assert preview["invalid_count"] == 0
+    committed = client.post(
+        "/api/machines/import/commit",
+        json={
+            "machines": [
+                {
+                    "code": machine["code"],
+                    "name": machine["name"],
+                    "bom_items": [
+                        {
+                            "part_id": item["part_id"],
+                            "quantity_per_machine": item["quantity_per_machine"],
+                        }
+                        for item in machine["bom_items"]
+                    ],
+                }
+                for machine in preview["machines"]
+            ]
+        },
+    )
+    assert committed.status_code == 200
+    assert committed.json() == {"created": 2, "updated": 0, "total": 2}
+    machines = {item["code"]: item for item in client.get("/api/machines").json()}
+    assert {
+        item["part_id"]: item["quantity_per_machine"]
+        for item in machines["MATRIX-B"]["bom_items"]
+    } == {assembly_a["id"]: 2, assembly_b["id"]: 1}
+
+    invalid = client.post(
+        "/api/machines/import/preview",
+        files={
+            "file": (
+                "整机BOM错误.xlsx",
+                make_xlsx(
+                    [
+                        ["料号", "描述", "BAD-MACHINE"],
+                        ["", "", "错误整机"],
+                        ["BOM-A", "装配件A", "=1+1"],
+                    ]
+                ),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    ).json()
+    assert invalid["invalid_count"] == 1
+    assert any("不支持公式" in error for error in invalid["machines"][0]["errors"])
+    assert "BAD-MACHINE" not in {
+        item["code"] for item in client.get("/api/machines").json()
+    }
+
+
+def test_machine_plan_matrix_replaces_same_week_and_keeps_manual_orders(
+    client: TestClient,
+):
+    part = client.post(
+        "/api/parts",
+        json={
+            "code": "PLAN-BOM",
+            "name": "计划装配件",
+            "standard_hours": 0.1,
+            "usage_types": ["assembly"],
+            "active": True,
+        },
+    ).json()
+    machine = client.post(
+        "/api/machines",
+        json={
+            "code": "PLAN-MACHINE",
+            "name": "计划整机",
+            "active": True,
+            "bom_items": [{"part_id": part["id"], "quantity_per_machine": 1}],
+        },
+    ).json()
+    manual_order = client.post(
+        "/api/production-orders",
+        json={
+            "order_type": "machine",
+            "source_id": machine["id"],
+            "quantity": 1,
+            "start_date": "2026-07-21",
+            "end_date": "2026-07-21",
+        },
+    ).json()
+    first_matrix = make_xlsx(
+        [
+            ["星期", "PLAN-MACHINE"],
+            ["星期一", 2],
+            ["星期二", ""],
+            ["星期三", ""],
+            ["星期四", ""],
+            ["星期五", ""],
+            ["星期六", 1],
+            ["星期日", ""],
+        ]
+    )
+    preview = client.post(
+        "/api/production-orders/machine-plan-import/preview",
+        data={"week_start": "2026-07-20"},
+        files={
+            "file": (
+                "整机周计划.xlsx",
+                first_matrix,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert preview.status_code == 200
+    preview_data = preview.json()
+    assert preview_data["nonzero_count"] == 2
+    assert preview_data["invalid_count"] == 0
+    entries = [
+        {
+            "machine_code": item["machine_code"],
+            "target_date": item["target_date"],
+            "quantity": item["quantity"],
+        }
+        for item in preview_data["entries"]
+        if item["quantity"] > 0
+    ]
+    committed = client.post(
+        "/api/production-orders/machine-plan-import/commit",
+        json={"week_start": "2026-07-20", "entries": entries},
+    )
+    assert committed.status_code == 200
+    assert committed.json()["created"] == 2
+    assert committed.json()["weekend_enabled"] is True
+    week_id = committed.json()["week_id"]
+    week = client.get(f"/api/weeks/{week_id}").json()
+    assert week["include_weekend"] is True
+
+    client.post("/api/production-orders/generate")
+    replacement = client.post(
+        "/api/production-orders/machine-plan-import/commit",
+        json={
+            "week_start": "2026-07-20",
+            "entries": [
+                {
+                    "machine_code": "PLAN-MACHINE",
+                    "target_date": "2026-07-20",
+                    "quantity": 3,
+                }
+            ],
+        },
+    )
+    assert replacement.status_code == 200
+    assert replacement.json()["replaced"] == 2
+    orders = client.get("/api/production-orders").json()
+    assert {item["id"] for item in orders if item["origin"] == "manual"} == {
+        manual_order["id"]
+    }
+    imported = [
+        item for item in orders if item["origin"] == "machine_plan_import"
+    ]
+    assert len(imported) == 1
+    assert imported[0]["quantity"] == 3
+    assert imported[0]["start_date"] == imported[0]["end_date"] == "2026-07-20"
+    assert imported[0]["import_week_start"] == "2026-07-20"
+
+    template = client.get(
+        "/api/production-orders/machine-plan-import/template"
+    )
+    bom_template = client.get("/api/machines/import/template")
+    assert template.status_code == 200 and template.content.startswith(b"PK")
+    assert bom_template.status_code == 200 and bom_template.content.startswith(b"PK")
+
+
+def test_confirmed_machine_leave_transfers_same_day_to_employee2_then_employee3(
+    client: TestClient,
+):
+    part = client.post(
+        "/api/parts",
+        json={
+            "code": "LEAVE-LEVEL-3",
+            "name": "请假三级装配件",
+            "standard_hours": 1,
+            "usage_types": ["assembly"],
+            "active": True,
+        },
+    ).json()
+    employees = [
+        create_employee(client, f"请假优先员工{level}", "core", [part["id"]])
+        for level in (1, 2, 3)
+    ]
+    client.put(
+        f"/api/parts/{part['id']}",
+        json={
+            "code": part["code"],
+            "name": part["name"],
+            "standard_hours": 1,
+            "usage_types": ["assembly"],
+            "level_1_employee_id": employees[0],
+            "level_2_employee_id": employees[1],
+            "level_3_employee_id": employees[2],
+            "active": True,
+        },
+    )
+    machine = client.post(
+        "/api/machines",
+        json={
+            "code": "LEAVE-LEVEL-3-M",
+            "name": "请假三级整机",
+            "active": True,
+            "bom_items": [{"part_id": part["id"], "quantity_per_machine": 1}],
+        },
+    ).json()
+    client.post(
+        "/api/production-orders",
+        json={
+            "order_type": "machine",
+            "source_id": machine["id"],
+            "quantity": 10,
+            "start_date": "2026-07-20",
+            "end_date": "2026-07-20",
+        },
+    )
+    week_id = client.post(
+        "/api/production-orders/generate"
+    ).json()["affected_week_ids"][0]
+    assert client.post(f"/api/weeks/{week_id}/confirm").status_code == 200
+    adjusted = client.post(
+        f"/api/weeks/{week_id}/leave-adjustments",
+        json={
+            "employee_id": employees[0],
+            "leave_dates": ["2026-07-20"],
+            "use_overtime": False,
+            "use_weekend": False,
+        },
+    )
+    assert adjusted.status_code == 200
+    detail = adjusted.json()
+    assert detail["summary"]["remaining_hours"] == 0
+    assert {
+        employee_id: sum(
+            assignment["quantity"]
+            for assignment in detail["assignments"]
+            if assignment["employee_id"] == employee_id
+            and assignment["part_id"] == part["id"]
+        )
+        for employee_id in employees
+    } == {
+        employees[0]: 0,
+        employees[1]: 6,
+        employees[2]: 4,
+    }
+    assert {
+        assignment["work_date"]
+        for assignment in detail["assignments"]
+        if assignment["part_id"] == part["id"]
+    } == {"2026-07-20"}

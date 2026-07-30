@@ -413,7 +413,7 @@ label small, .field-note { color: var(--muted); font-size: 10px; }
 .availability-editor-row > span b, .availability-editor-row > span small { display: block; }
 .availability-editor-row > span b { font-size: 12px; }.availability-editor-row > span small { color: var(--muted); font-size: 9px; }
 .priority-picker { display: grid; gap: 10px; }
-.priority-picker-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.priority-picker-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .priority-picker-column { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #fbfdfc; }
 .priority-employee-options { display: grid; gap: 6px; max-height: 190px; overflow: auto; }
 .priority-employee-options button { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); text-align: left; }

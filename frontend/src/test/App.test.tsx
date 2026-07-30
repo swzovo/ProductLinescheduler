@@ -331,6 +331,16 @@ describe("应用导航与容量展示", () => {
     expect(screen.getByRole("spinbutton", { name: "ASM-001 每台用量" })).toBeEnabled();
   });
 
+  it("整机管理提供BOM矩阵导入入口和模板说明", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /整机与BOM/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "导入BOM矩阵" }));
+
+    expect(await screen.findByText("导入整机BOM矩阵")).toBeInTheDocument();
+    expect(screen.getByText(/第一行为整机编号，第二行为整机名称/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下载Excel模板" })).toBeInTheDocument();
+  });
+
   it("生产需求页面提供整机计划、附件订单和跨周一键生成", async () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /订单与跨周计划/ }));
@@ -339,6 +349,29 @@ describe("应用导航与容量展示", () => {
     expect(screen.getByRole("button", { name: /整机计划/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /附件订单/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /一键生成所有相关周排班/ })).toBeDisabled();
+  });
+
+  it("新增任务日期默认同一天并提供整机周计划矩阵导入", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /订单与跨周计划/ }));
+
+    fireEvent.click(await screen.findByRole("button", { name: /整机计划/ }));
+    const startInput = screen.getByText("开始日期").parentElement?.querySelector("input");
+    const endInput = screen.getByText("截止日期").parentElement?.querySelector("input");
+    expect(startInput).not.toBeNull();
+    expect(endInput).not.toBeNull();
+    expect((startInput as HTMLInputElement).value).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect((endInput as HTMLInputElement).value).toBe(
+      (startInput as HTMLInputElement).value,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "导入整机周计划" }));
+    expect(
+      await screen.findByRole("heading", { name: "导入整机周计划" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/星期一至星期日/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下载Excel模板" })).toBeInTheDocument();
   });
 
   it("任务清单提供安全永久删除入口", async () => {

@@ -5,6 +5,7 @@ import { Toast } from "../components/Toast";
 import type {
   AccessoryOrderImportPreview,
   Machine,
+  MachinePlanMatrixPreview,
   Part,
   ProductionOrder,
 } from "../types";
@@ -39,7 +40,7 @@ export function ProductionOrdersPage({ defaultWeekStart, onOpenSchedule }: { def
   const [machines, setMachines] = useState<Machine[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
   const [editing, setEditing] = useState<ProductionOrder | "new" | null>(null);
-  const [form, setForm] = useState<OrderForm>({ order_type: "machine", source_id: 0, quantity: 1, start_date: defaults.start, end_date: defaults.end });
+  const [form, setForm] = useState<OrderForm>({ order_type: "machine", source_id: 0, quantity: 1, start_date: defaults.today, end_date: defaults.today });
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "machine" | "accessory">("all");
@@ -51,6 +52,14 @@ export function ProductionOrdersPage({ defaultWeekStart, onOpenSchedule }: { def
     useState<AccessoryOrderImportPreview | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [templatePath, setTemplatePath] = useState<string | null>(null);
+  const [machinePlanImportOpen, setMachinePlanImportOpen] = useState(false);
+  const [machinePlanBusy, setMachinePlanBusy] = useState(false);
+  const [machinePlanWeek, setMachinePlanWeek] = useState(defaults.start);
+  const [machinePlanPreview, setMachinePlanPreview] =
+    useState<MachinePlanMatrixPreview | null>(null);
+  const [machinePlanError, setMachinePlanError] = useState<string | null>(null);
+  const [machinePlanTemplatePath, setMachinePlanTemplatePath] =
+    useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -86,8 +95,8 @@ export function ProductionOrdersPage({ defaultWeekStart, onOpenSchedule }: { def
       order_type: type,
       source_id: type === "machine" ? activeMachines[0]?.id ?? 0 : 0,
       quantity: 1,
-      start_date: type === "machine" ? defaults.start : defaults.today,
-      end_date: type === "machine" ? defaults.end : defaults.today,
+      start_date: defaults.today,
+      end_date: defaults.today,
     });
   };
 
@@ -221,14 +230,94 @@ export function ProductionOrdersPage({ defaultWeekStart, onOpenSchedule }: { def
     }
   };
 
+  const openMachinePlanImport = () => {
+    setMachinePlanWeek(defaults.start);
+    setMachinePlanPreview(null);
+    setMachinePlanError(null);
+    setMachinePlanTemplatePath(null);
+    setMachinePlanImportOpen(true);
+  };
+
+  const saveMachinePlanTemplate = async () => {
+    setMachinePlanBusy(true);
+    try {
+      const result = await api<{ filename: string; path: string }>(
+        "/production-orders/machine-plan-import/template/save",
+        { method: "POST" },
+      );
+      setMachinePlanTemplatePath(result.path);
+    } catch (error) {
+      setMessage({ text: (error as Error).message, error: true });
+    } finally {
+      setMachinePlanBusy(false);
+    }
+  };
+
+  const previewMachinePlan = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setMachinePlanBusy(true);
+    setMachinePlanPreview(null);
+    setMachinePlanError(null);
+    try {
+      const body = new FormData();
+      body.append("week_start", machinePlanWeek);
+      body.append("file", file);
+      setMachinePlanPreview(
+        await api<MachinePlanMatrixPreview>(
+          "/production-orders/machine-plan-import/preview",
+          { method: "POST", body },
+        ),
+      );
+    } catch (error) {
+      setMachinePlanError((error as Error).message);
+    } finally {
+      setMachinePlanBusy(false);
+      event.target.value = "";
+    }
+  };
+
+  const commitMachinePlan = async () => {
+    if (!machinePlanPreview || machinePlanPreview.invalid_count > 0) return;
+    setMachinePlanBusy(true);
+    try {
+      const result = await api<{ created: number; replaced: number }>(
+        "/production-orders/machine-plan-import/commit",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            week_start: machinePlanPreview.week_start,
+            entries: machinePlanPreview.entries
+              .filter((entry) => entry.quantity > 0)
+              .map((entry) => ({
+                machine_code: entry.machine_code,
+                target_date: entry.target_date,
+                quantity: entry.quantity,
+              })),
+          }),
+        },
+      );
+      setMachinePlanImportOpen(false);
+      setMachinePlanPreview(null);
+      await load();
+      setMessage({
+        text: `整机周计划已导入：创建 ${result.created} 条，替换旧计划 ${result.replaced} 条；请一键生成排班`,
+      });
+    } catch (error) {
+      setMessage({ text: (error as Error).message, error: true });
+    } finally {
+      setMachinePlanBusy(false);
+    }
+  };
+
   const totalHours = orders.filter((item) => item.status === "active").reduce((sum, item) => sum + item.required_hours, 0);
   const remainingHours = orders.filter((item) => item.status === "active").reduce((sum, item) => sum + item.remaining_hours, 0);
 
   return (
     <>
       <section className="section-heading">
-        <div><span className="eyebrow">PRODUCTION REQUIREMENTS</span><h2>生产需求与跨周任务</h2><p>整机零件优先均分，附件订单从最早空闲日期开始填充。</p></div>
-        <div className="heading-actions"><button className="secondary-button" onClick={openImport}>表格批量导入</button><button className="secondary-button" onClick={() => openNew("accessory")}>＋ 附件订单</button><button className="primary-button" onClick={() => openNew("machine")}>＋ 整机计划</button></div>
+        <div><span className="eyebrow">PRODUCTION REQUIREMENTS</span><h2>生产需求与跨周任务</h2><p>整机优先在目标日完成，附件订单从最早空闲日期开始填充。</p></div>
+        <div className="heading-actions"><button className="secondary-button" onClick={openMachinePlanImport}>导入整机周计划</button><button className="secondary-button" onClick={openImport}>导入附件表格</button><button className="secondary-button" onClick={() => openNew("accessory")}>＋ 附件订单</button><button className="primary-button" onClick={() => openNew("machine")}>＋ 整机计划</button></div>
       </section>
 
       <div className="summary-strip">
@@ -273,8 +362,8 @@ export function ProductionOrdersPage({ defaultWeekStart, onOpenSchedule }: { def
             {editing === "new" && <label><span>任务类型</span><select value={form.order_type} onChange={(event) => {
               const type = event.target.value as "machine" | "accessory";
               setPartSearch("");
-              setForm({ ...form, order_type: type, source_id: type === "machine" ? activeMachines[0]?.id ?? 0 : 0, start_date: type === "machine" ? defaults.start : defaults.today, end_date: type === "machine" ? defaults.end : defaults.today });
-            }}><option value="machine">整机计划（优先每天均分）</option><option value="accessory">附件订单（从前往后填充）</option></select></label>}
+              setForm({ ...form, order_type: type, source_id: type === "machine" ? activeMachines[0]?.id ?? 0 : 0, start_date: defaults.today, end_date: defaults.today });
+            }}><option value="machine">整机计划（优先目标日完成）</option><option value="accessory">附件订单（从前往后填充）</option></select></label>}
             {editing === "new" && form.order_type === "accessory" && (
               <fieldset className="full-field skill-picker accessory-part-picker">
                 <legend>选择附件零件</legend>
@@ -456,6 +545,89 @@ export function ProductionOrdersPage({ defaultWeekStart, onOpenSchedule }: { def
                   {importPreview.invalid_count
                     ? "请先修正表格错误"
                     : `确认导入 ${importPreview.valid_count} 条`}
+                </button>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
+      {machinePlanImportOpen && (
+        <Modal
+          title="导入整机周计划"
+          width="980px"
+          onClose={() => !machinePlanBusy && setMachinePlanImportOpen(false)}
+        >
+          <div className="import-guide">
+            <div>
+              <strong>按星期和机型批量建立每日整机任务</strong>
+              <p>空白或0表示当天没有该机型；再次导入同一周会完整替换此前通过周计划表导入的任务。</p>
+            </div>
+            <button type="button" className="secondary-button" disabled={machinePlanBusy} onClick={() => void saveMachinePlanTemplate()}>
+              下载Excel模板
+            </button>
+          </div>
+          {machinePlanTemplatePath && (
+            <div className="template-save-success">
+              <strong>模板保存成功</strong>
+              <span>{machinePlanTemplatePath}</span>
+            </div>
+          )}
+          <label>
+            <span>目标周周一</span>
+            <input
+              type="date"
+              value={machinePlanWeek}
+              disabled={machinePlanBusy}
+              onChange={(event) => {
+                setMachinePlanWeek(event.target.value);
+                setMachinePlanPreview(null);
+                setMachinePlanError(null);
+              }}
+            />
+          </label>
+          <label className="file-drop">
+            <input type="file" accept=".xlsx" disabled={machinePlanBusy || !machinePlanWeek} onChange={previewMachinePlan} />
+            <span>{machinePlanBusy ? "正在读取并校验…" : "选择 .xlsx 周计划文件"}</span>
+            <small>星期一至星期日映射到所选周；今天以前的非零计划会报错</small>
+          </label>
+          {machinePlanError && (
+            <div className="import-format-error" role="alert">
+              <strong>表格格式有误，暂时无法导入</strong>
+              <p>{machinePlanError}</p>
+            </div>
+          )}
+          {machinePlanPreview && (
+            <>
+              <div className="import-summary">
+                <span>目标周 <b>{machinePlanPreview.week_start}</b></span>
+                <span className="success-text">非零任务 <b>{machinePlanPreview.nonzero_count}</b></span>
+                <span className={machinePlanPreview.invalid_count ? "danger-text" : ""}>错误单元格 <b>{machinePlanPreview.invalid_count}</b></span>
+              </div>
+              <div className="table-wrap import-preview-table">
+                <table>
+                  <thead><tr><th>日期</th><th>整机编号</th><th>整机名称</th><th>数量</th><th>校验结果</th></tr></thead>
+                  <tbody>
+                    {machinePlanPreview.entries
+                      .filter((entry) => entry.quantity > 0 || entry.errors.length > 0)
+                      .map((entry) => (
+                        <tr key={`${entry.target_date}-${entry.machine_code}`} className={entry.errors.length ? "error-row" : ""}>
+                          <td>{entry.target_date}</td>
+                          <td><span className="code-chip">{entry.machine_code}</span></td>
+                          <td>{entry.machine_name || "—"}</td>
+                          <td>{entry.quantity}</td>
+                          <td>{entry.errors.length ? <span className="danger-text">{entry.errors.join("；")}</span> : <span className="success-text">校验通过</span>}</td>
+                        </tr>
+                      ))}
+                    {machinePlanPreview.nonzero_count === 0 && machinePlanPreview.invalid_count === 0 && (
+                      <tr><td colSpan={5}>本表没有非零任务；提交后会清空该周此前导入的整机计划。</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <div className="form-actions">
+                <button type="button" className="ghost-button" onClick={() => setMachinePlanImportOpen(false)}>取消</button>
+                <button type="button" className="primary-button" disabled={machinePlanBusy || machinePlanPreview.invalid_count > 0} onClick={() => void commitMachinePlan()}>
+                  {machinePlanPreview.invalid_count ? "请先修正表格错误" : "确认替换该周导入计划"}
                 </button>
               </div>
             </>

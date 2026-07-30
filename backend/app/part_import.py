@@ -33,6 +33,7 @@ HEADER_ALIASES = {
     "employee_names": {"员工", "制作员工", "可制作员工", "employee", "employees"},
     "employee_level1_names": {"员工1", "一级员工", "优先员工", "employee1"},
     "employee_level2_names": {"员工2", "二级员工", "次选员工", "employee2"},
+    "employee_level3_names": {"员工3", "三级员工", "第三员工", "employee3"},
 }
 TRUE_VALUES = {"启用", "是", "1", "true", "yes", "y"}
 FALSE_VALUES = {"停用", "否", "0", "false", "no", "n"}
@@ -346,16 +347,29 @@ def preview_import(
         employee_level2_names, level2_errors = _parse_employee_names(
             values.get("employee_level2_names", CellValue(None)).value
         )
+        employee_level3_names, level3_errors = _parse_employee_names(
+            values.get("employee_level3_names", CellValue(None)).value
+        )
         errors.extend(level1_errors)
         errors.extend(level2_errors)
+        errors.extend(level3_errors)
         if len(employee_level1_names) > 1:
             errors.append("员工1每格只能填写一名员工")
         if len(employee_level2_names) > 1:
             errors.append("员工2每格只能填写一名员工")
-        overlap = set(employee_level1_names) & set(employee_level2_names)
-        if overlap:
+        if len(employee_level3_names) > 1:
+            errors.append("员工3每格只能填写一名员工")
+        priority_names = [
+            *employee_level1_names,
+            *employee_level2_names,
+            *employee_level3_names,
+        ]
+        duplicates = sorted(
+            {name for name in priority_names if priority_names.count(name) > 1}
+        )
+        if duplicates:
             errors.append(
-                f"同一员工不能同时设置为员工1和员工2：{'、'.join(sorted(overlap))}"
+                f"同一员工不能同时设置为多个优先级：{'、'.join(duplicates)}"
             )
         current = existing.get(code)
         effective_active = (
@@ -385,6 +399,7 @@ def preview_import(
             "employee_names": employee_names,
             "employee_level1_names": employee_level1_names,
             "employee_level2_names": employee_level2_names,
+            "employee_level3_names": employee_level3_names,
             "action": "update" if current is not None else "create",
             "errors": errors,
         }

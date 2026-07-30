@@ -22,6 +22,7 @@ export interface Part {
   active: boolean;
   level_1_employee_id: number | null;
   level_2_employee_id: number | null;
+  level_3_employee_id: number | null;
   level_1_employee?: {
     employee_id: number;
     employee_name: string;
@@ -31,6 +32,11 @@ export interface Part {
     employee_id: number;
     employee_name: string;
     priority_level: 2;
+  } | null;
+  level_3_employee?: {
+    employee_id: number;
+    employee_name: string;
+    priority_level: 3;
   } | null;
 }
 
@@ -44,6 +50,7 @@ export interface PartImportRow {
   employee_names: string[];
   employee_level1_names: string[];
   employee_level2_names: string[];
+  employee_level3_names: string[];
   action: "create" | "update";
   errors: string[];
 }
@@ -64,6 +71,46 @@ export interface Machine {
   name: string;
   active: boolean;
   bom_items: MachineBomItem[];
+}
+
+export interface MachineBomMatrixPreview {
+  filename: string;
+  total_machines: number;
+  valid_count: number;
+  invalid_count: number;
+  machines: {
+    column: number;
+    code: string;
+    name: string;
+    action: "create" | "update";
+    existing_active: boolean;
+    bom_items: {
+      part_id: number;
+      part_code: string;
+      part_name: string;
+      quantity_per_machine: number;
+    }[];
+    errors: string[];
+  }[];
+}
+
+export interface MachinePlanMatrixPreview {
+  filename: string;
+  week_start: string;
+  total_cells: number;
+  nonzero_count: number;
+  invalid_count: number;
+  entries: {
+    row_number: number;
+    column: number;
+    weekday: number;
+    target_date: string;
+    machine_code: string;
+    machine_id: number | null;
+    machine_name: string;
+    quantity: number;
+    errors: string[];
+  }[];
 }
 
 export interface ProductionOrderItem {
@@ -88,6 +135,8 @@ export interface ProductionOrder {
   start_date: string;
   end_date: string;
   status: "active" | "cancelled" | "legacy";
+  origin: "manual" | "accessory_import" | "machine_plan_import" | "legacy";
+  import_week_start?: string | null;
   needs_generation: boolean;
   schedule_status: "completed" | "partial" | "unscheduled";
   required_hours: number;
@@ -138,7 +187,7 @@ export interface Employee {
   unavailable_weekdays: number[];
   active: boolean;
   skill_part_ids: number[];
-  skill_priorities?: { part_id: number; priority_level: 1 | 2 }[];
+  skill_priorities?: { part_id: number; priority_level: 1 | 2 | 3 }[];
 }
 
 export interface WeekListItem {
@@ -162,6 +211,8 @@ export interface WeekDemand {
     order_item_id: number;
     production_order_id: number;
     order_type: "machine" | "accessory";
+    start_date: string;
+    end_date: string;
     source_code: string;
     source_name: string;
     quantity: number;
@@ -206,6 +257,7 @@ export interface Assignment {
   part_code: string;
   part_name: string;
   work_date: string;
+  target_date: string;
   quantity: number;
   standard_hours: number;
   source: "generated" | "manual";

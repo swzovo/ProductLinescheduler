@@ -37,7 +37,7 @@ class SettingsUpdate(BaseModel):
 
 class PartSkillPriorityInput(BaseModel):
     employee_id: int
-    priority_level: Literal[1, 2]
+    priority_level: Literal[1, 2, 3]
 
 
 class PartCreate(BaseModel):
@@ -48,6 +48,7 @@ class PartCreate(BaseModel):
     employee_priorities: list[PartSkillPriorityInput] | None = None
     level_1_employee_id: int | None = None
     level_2_employee_id: int | None = None
+    level_3_employee_id: int | None = None
     active: bool = True
 
     @field_validator("usage_types")
@@ -68,20 +69,26 @@ class PartCreate(BaseModel):
             return value
         ids = [item.employee_id for item in value]
         if len(ids) != len(set(ids)):
-            raise ValueError("同一员工不能同时设置为员工1和员工2")
+            raise ValueError("同一员工不能同时设置为多个优先级")
         return value
 
     @model_validator(mode="after")
     def validate_priority_slots(self):
-        if (
-            self.level_1_employee_id is not None
-            and self.level_1_employee_id == self.level_2_employee_id
-        ):
-            raise ValueError("同一员工不能同时设置为员工1和员工2")
+        slot_ids = [
+            employee_id
+            for employee_id in (
+                self.level_1_employee_id,
+                self.level_2_employee_id,
+                self.level_3_employee_id,
+            )
+            if employee_id is not None
+        ]
+        if len(slot_ids) != len(set(slot_ids)):
+            raise ValueError("同一员工不能同时设置为多个优先级")
         if self.employee_priorities is not None:
             by_level = [item.priority_level for item in self.employee_priorities]
             if len(by_level) != len(set(by_level)):
-                raise ValueError("员工1和员工2每级最多选择一名员工")
+                raise ValueError("员工1、员工2和员工3每级最多选择一名员工")
         return self
 
 
@@ -98,6 +105,7 @@ class PartImportItem(BaseModel):
     employee_names: list[str] = Field(default_factory=list, max_length=200)
     employee_level1_names: list[str] = Field(default_factory=list, max_length=1)
     employee_level2_names: list[str] = Field(default_factory=list, max_length=1)
+    employee_level3_names: list[str] = Field(default_factory=list, max_length=1)
 
     @field_validator("employee_names")
     @classmethod
@@ -107,22 +115,31 @@ class PartImportItem(BaseModel):
             raise ValueError("员工姓名不能超过100个字符")
         return normalized
 
-    @field_validator("employee_level1_names", "employee_level2_names")
+    @field_validator(
+        "employee_level1_names",
+        "employee_level2_names",
+        "employee_level3_names",
+    )
     @classmethod
     def validate_priority_employee_names(cls, value: list[str]):
         normalized = list(dict.fromkeys(name.strip() for name in value if name.strip()))
         if any(len(name) > 100 for name in normalized):
             raise ValueError("员工姓名不能超过100个字符")
         if len(normalized) > 1:
-            raise ValueError("员工1和员工2每格只能填写一名员工")
+            raise ValueError("员工1、员工2和员工3每格只能填写一名员工")
         return normalized
 
     @model_validator(mode="after")
     def validate_priority_names(self):
-        overlap = set(self.employee_level1_names) & set(self.employee_level2_names)
-        if overlap:
+        names = [
+            *self.employee_level1_names,
+            *self.employee_level2_names,
+            *self.employee_level3_names,
+        ]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
             raise ValueError(
-                f"员工不能同时属于员工1和员工2：{'、'.join(sorted(overlap))}"
+                f"员工不能同时属于多个优先级：{'、'.join(duplicates)}"
             )
         return self
 
@@ -153,6 +170,60 @@ class MachineCreate(BaseModel):
 
 class MachineUpdate(MachineCreate):
     pass
+
+
+class MachineMatrixImportItem(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=100)
+    bom_items: list[MachineBomInput] = Field(min_length=1, max_length=1000)
+
+    @field_validator("bom_items")
+    @classmethod
+    def validate_unique_matrix_bom(cls, value: list[MachineBomInput]):
+        ids = [item.part_id for item in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("同一整机不能重复选择相同零件")
+        return value
+
+
+class MachineMatrixImportCommit(BaseModel):
+    machines: list[MachineMatrixImportItem] = Field(
+        min_length=1,
+        max_length=500,
+    )
+
+
+class MachinePlanImportEntry(BaseModel):
+    machine_code: str = Field(min_length=1, max_length=40)
+    target_date: date
+    quantity: int = Field(gt=0, le=10_000_000)
+
+
+class MachinePlanImportCommit(BaseModel):
+    week_start: date
+    entries: list[MachinePlanImportEntry] = Field(
+        default_factory=list,
+        max_length=5000,
+    )
+
+    @model_validator(mode="after")
+    def validate_plan_week(self):
+        if self.week_start.weekday() != 0:
+            raise ValueError("目标周必须选择周一")
+        last_day = date.fromordinal(self.week_start.toordinal() + 6)
+        if any(
+            item.target_date < self.week_start
+            or item.target_date > last_day
+            for item in self.entries
+        ):
+            raise ValueError("计划日期必须属于所选目标周")
+        pairs = [
+            (item.machine_code.strip(), item.target_date)
+            for item in self.entries
+        ]
+        if len(pairs) != len(set(pairs)):
+            raise ValueError("同一整机同一天不能重复")
+        return self
 
 
 class ProductionOrderCreate(BaseModel):
@@ -298,6 +369,7 @@ class AssignmentInput(BaseModel):
     part_id: int
     order_item_id: int | None = None
     work_date: date
+    target_date: date | None = None
     quantity: int = Field(gt=0)
 
 
