@@ -20,6 +20,12 @@ const STATUS: Record<WeekStatus, string> = {
   confirmed: "已确认",
 };
 
+type ResolutionMode =
+  | "alternate"
+  | "overtime"
+  | "advance"
+  | "reinforcement";
+
 const weekday = (value: string) =>
   new Intl.DateTimeFormat("zh-CN", { weekday: "short" }).format(
     new Date(`${value}T00:00:00`),
@@ -62,7 +68,8 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
   const [demandOpen, setDemandOpen] = useState(false);
   const [demandValues, setDemandValues] = useState<Record<number, number>>({});
   const [shortageOpen, setShortageOpen] = useState(false);
-  const [resolutionMode, setResolutionMode] = useState<"reinforcement" | "overtime">("overtime");
+  const [resolutionMode, setResolutionMode] =
+    useState<ResolutionMode>("overtime");
   const [selectedCandidates, setSelectedCandidates] = useState<number[]>([]);
   const [assignmentOpen, setAssignmentOpen] = useState<Assignment | "new" | null>(null);
   const [assignmentForm, setAssignmentForm] = useState({
@@ -223,11 +230,21 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
   const candidates: Candidate[] = week
     ? resolutionMode === "reinforcement"
       ? week.shortage.reinforcement_candidates
-      : week.shortage.overtime_candidates
+      : resolutionMode === "overtime"
+        ? week.shortage.overtime_candidates
+        : []
     : [];
+  const resolutionNeedsCandidates =
+    resolutionMode === "reinforcement" || resolutionMode === "overtime";
+  const hasMachineShortage =
+    week?.shortage.machine_remaining_hours === undefined ||
+    week.shortage.machine_remaining_hours > 0;
 
   const resolve = async () => {
-    if (!week || !selectedCandidates.length) return;
+    if (
+      !week ||
+      (resolutionNeedsCandidates && !selectedCandidates.length)
+    ) return;
     setBusy(true);
     try {
       const result = await api<WeekDetail>(`/weeks/${week.id}/resolve`, {
@@ -243,10 +260,14 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
       setMessage({
         text:
           result.summary.remaining_hours > 0
-            ? "已按所选人员重排，仍有任务缺口"
+            ? "已按所选方案重新计算，仍有任务缺口，可继续选择其他处理方式"
             : resolutionMode === "reinforcement"
               ? "增援人员已加入并完成重排"
-              : "加班方案已生成并记录",
+              : resolutionMode === "overtime"
+                ? "加班方案已生成并记录"
+                : resolutionMode === "alternate"
+                  ? "已授权员工2/3接手目标日任务"
+                  : "已授权在目标日前提前生产",
       });
     } catch (error) {
       setMessage({ text: (error as Error).message, error: true });
@@ -769,21 +790,17 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
                 <strong>
                   {week.active_adjustment
                     ? "请假调整后仍有任务无法按期完成"
-                    : week.shortage.suggestion === "reinforcement"
-                    ? "建议安排候补人员增援"
-                    : week.shortage.suggestion === "overtime"
-                      ? "建议由合格员工加班完成"
-                      : "当前人员与技能无法覆盖全部任务"}
+                    : "任务缺口待管理员选择处理方式"}
                 </strong>
                 <p>
                   剩余 {week.summary.remaining_hours.toFixed(2)} 标准工时。
-                  {!week.active_adjustment && ` 半周判断阈值为 ${week.summary.shortage_threshold.toFixed(3)} 小时。`}
+                  {!week.active_adjustment && " 整机默认只在目标日交给首选员工，不会自动跨天或改派。"}
                   {week.active_adjustment && " 整机已按优先级尝试转派和提前生产，附件已尝试由本人补做；可取消本次调整后重新选择补班方式。"}
                   {week.shortage.missing_skill_parts.length > 0 &&
                     ` 未覆盖零件：${week.shortage.missing_skill_parts.map((item) => `${item.part_code} · ${item.part_name}`).join("、")}。`}
                 </p>
               </div>
-              {!week.active_adjustment && <button onClick={() => setShortageOpen(true)}>查看人选</button>}
+              {!week.active_adjustment && <button onClick={() => setShortageOpen(true)}>选择处理方式</button>}
             </section>
           )}
 
@@ -921,7 +938,22 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
         <Modal title="人工处理任务缺口" width="760px" onClose={() => setShortageOpen(false)}>
           <div className="resolution-summary">
             <span>尚未安排</span><strong>{week.summary.remaining_hours.toFixed(2)}h</strong>
-            <p>系统只提供合格候选人，由你决定本周实际加入或加班的人员。</p>
+            <p>整机缺口不会自动跨天或改派。请选择本周允许使用的处理方式；多种方式可以依次组合。</p>
+            {week.shortage.machine_remaining_hours !== undefined && (
+              <small>
+                整机目标日缺口 {week.shortage.machine_remaining_hours.toFixed(2)}h
+                {" · "}
+                附件订单缺口 {(week.shortage.accessory_remaining_hours ?? 0).toFixed(2)}h
+              </small>
+            )}
+          </div>
+          <div className="resolution-policy-status">
+            <span className={week.machine_resolution?.allow_alternates ? "enabled" : ""}>
+              员工2/3：{week.machine_resolution?.allow_alternates ? "已授权" : "未授权"}
+            </span>
+            <span className={week.machine_resolution?.allow_advance ? "enabled" : ""}>
+              提前生产：{week.machine_resolution?.allow_advance ? "已授权" : "未授权"}
+            </span>
           </div>
           {week.shortage.missing_skill_parts.length > 0 && (
             <section className="missing-skill-summary">
@@ -939,6 +971,10 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
             </section>
           )}
           <div className="mode-tabs">
+            <button disabled={!hasMachineShortage} className={resolutionMode === "alternate" ? "active" : ""} onClick={() => { setResolutionMode("alternate"); setSelectedCandidates([]); }}>
+              使用员工2/3
+              <small>仅目标日</small>
+            </button>
             <button className={resolutionMode === "reinforcement" ? "active" : ""} onClick={() => { setResolutionMode("reinforcement"); setSelectedCandidates([]); }}>
               候补增援
               {week.shortage.suggestion === "reinforcement" && <small>系统建议</small>}
@@ -947,27 +983,45 @@ export function WeekPlanner({ onOpenProduction }: { onOpenProduction: (weekStart
               安排加班
               {week.shortage.suggestion === "overtime" && <small>系统建议</small>}
             </button>
+            <button disabled={!hasMachineShortage} className={resolutionMode === "advance" ? "active" : ""} onClick={() => { setResolutionMode("advance"); setSelectedCandidates([]); }}>
+              提前生产
+              <small>向目标日前回排</small>
+            </button>
           </div>
-          <div className="candidate-list">
-            {candidates.length ? candidates.map((candidate) => (
-              <label key={candidate.employee_id} className={selectedCandidates.includes(candidate.employee_id) ? "selected" : ""}>
-                <input
-                  type="checkbox"
-                  checked={selectedCandidates.includes(candidate.employee_id)}
-                  onChange={() => setSelectedCandidates((items) => items.includes(candidate.employee_id) ? items.filter((id) => id !== candidate.employee_id) : [...items, candidate.employee_id])}
-                />
-                <div className="avatar small">{candidate.name.slice(0, 1)}</div>
-                <span><b>{candidate.name}</b><small>覆盖：{candidate.coverage_parts.join("、")}</small></span>
-                <em>最多 {candidate.available_capacity.toFixed(1)}h</em>
-              </label>
-            )) : (
-              <div className="empty-candidates">没有符合当前缺口技能要求的可选人员。</div>
-            )}
-          </div>
+          {resolutionNeedsCandidates ? (
+            <div className="candidate-list">
+              {candidates.length ? candidates.map((candidate) => (
+                <label key={candidate.employee_id} className={selectedCandidates.includes(candidate.employee_id) ? "selected" : ""}>
+                  <input
+                    type="checkbox"
+                    checked={selectedCandidates.includes(candidate.employee_id)}
+                    onChange={() => setSelectedCandidates((items) => items.includes(candidate.employee_id) ? items.filter((id) => id !== candidate.employee_id) : [...items, candidate.employee_id])}
+                  />
+                  <div className="avatar small">{candidate.name.slice(0, 1)}</div>
+                  <span><b>{candidate.name}</b><small>覆盖：{candidate.coverage_parts.join("、")}</small></span>
+                  <em>最多 {candidate.available_capacity.toFixed(1)}h</em>
+                </label>
+              )) : (
+                <div className="empty-candidates">没有符合当前缺口技能要求的可选人员。</div>
+              )}
+            </div>
+          ) : (
+            <div className="resolution-explanation">
+              {resolutionMode === "alternate"
+                ? "授权后，整机任务仍只安排在目标日；首选员工容量不足时，才依次使用该零件的员工2和员工3。"
+                : "授权后，系统才会把目标日仍无法完成的整机任务向前安排；不会安排到目标日之后，也不会早于系统当天。"}
+            </div>
+          )}
           <div className="form-actions">
             <button className="ghost-button" onClick={() => setShortageOpen(false)}>稍后处理</button>
-            <button className="primary-button" disabled={!selectedCandidates.length || busy} onClick={() => void resolve()}>
-              {busy ? "正在重新计算…" : "使用所选人员重新排班"}
+            <button className="primary-button" disabled={(resolutionNeedsCandidates && !selectedCandidates.length) || busy} onClick={() => void resolve()}>
+              {busy
+                ? "正在重新计算…"
+                : resolutionMode === "alternate"
+                  ? "授权员工2/3并重排"
+                  : resolutionMode === "advance"
+                    ? "授权提前生产并重排"
+                    : "使用所选人员重新排班"}
             </button>
           </div>
         </Modal>

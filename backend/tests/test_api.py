@@ -1467,7 +1467,7 @@ def test_machine_remainder_is_spread_and_order_hour_snapshots_stay_exact(client:
     assert detail["summary"]["remaining_hours"] == 0
 
 
-def test_machine_uses_employee1_before_employee2_and_keeps_daily_targets(
+def test_machine_uses_employee2_only_after_admin_authorizes_alternate(
     client: TestClient,
 ):
     part = client.post(
@@ -1518,6 +1518,25 @@ def test_machine_uses_employee1_before_employee2_and_keeps_daily_targets(
         "/api/production-orders/generate"
     ).json()["affected_week_ids"][0]
     detail = client.get(f"/api/weeks/{week_id}").json()
+    initial_quantities = {
+        employee_id: sum(
+            assignment["quantity"]
+            for assignment in detail["assignments"]
+            if assignment["employee_id"] == employee_id
+        )
+        for employee_id in (employee1, employee2)
+    }
+    assert initial_quantities == {employee1: 30, employee2: 0}
+    assert detail["summary"]["remaining_hours"] == 10
+    assert detail["machine_resolution"] == {
+        "allow_alternates": False,
+        "allow_advance": False,
+    }
+
+    detail = client.post(
+        f"/api/weeks/{week_id}/resolve",
+        json={"mode": "alternate", "employee_ids": []},
+    ).json()
     quantities = {
         employee_id: sum(
             assignment["quantity"]
@@ -1527,6 +1546,7 @@ def test_machine_uses_employee1_before_employee2_and_keeps_daily_targets(
         for employee_id in (employee1, employee2)
     }
     assert quantities == {employee1: 30, employee2: 10}
+    assert detail["machine_resolution"]["allow_alternates"] is True
     assert [
         sum(
             assignment["quantity"]
@@ -1895,7 +1915,9 @@ def test_data_maintenance_clears_cache_and_schedule_history_but_keeps_master_dat
     assert any(item["id"] == employee_id for item in client.get("/api/employees").json())
 
 
-def test_employee3_priority_and_machine_target_day_backfill(client: TestClient):
+def test_employee3_and_advance_require_separate_admin_authorization(
+    client: TestClient,
+):
     part = client.post(
         "/api/parts",
         json={
@@ -1964,9 +1986,46 @@ def test_employee3_priority_and_machine_target_day_backfill(client: TestClient):
         for employee_id in employee_ids
     } == {
         employee_ids[0]: 6,
+        employee_ids[1]: 0,
+        employee_ids[2]: 0,
+    }
+    assert detail["summary"]["remaining_hours"] == 14
+    assert all(
+        assignment["work_date"] == assignment["target_date"]
+        for assignment in detail["assignments"]
+    )
+
+    alternated = client.post(
+        f"/api/weeks/{week_id}/resolve",
+        json={"mode": "alternate", "employee_ids": []},
+    )
+    assert alternated.status_code == 200
+    detail = alternated.json()
+    assert {
+        employee_id: sum(
+            assignment["quantity"]
+            for assignment in detail["assignments"]
+            if assignment["employee_id"] == employee_id
+            and assignment["work_date"] == "2026-07-22"
+        )
+        for employee_id in employee_ids
+    } == {
+        employee_ids[0]: 6,
         employee_ids[1]: 6,
         employee_ids[2]: 6,
     }
+    assert detail["summary"]["remaining_hours"] == 2
+    assert not any(
+        assignment["work_date"] != assignment["target_date"]
+        for assignment in detail["assignments"]
+    )
+
+    advanced = client.post(
+        f"/api/weeks/{week_id}/resolve",
+        json={"mode": "advance", "employee_ids": []},
+    )
+    assert advanced.status_code == 200
+    detail = advanced.json()
     earlier = [
         assignment
         for assignment in detail["assignments"]
@@ -1981,6 +2040,10 @@ def test_employee3_priority_and_machine_target_day_backfill(client: TestClient):
         assignment["work_date"] >= "2026-07-20"
         for assignment in detail["assignments"]
     )
+    assert detail["machine_resolution"] == {
+        "allow_alternates": True,
+        "allow_advance": True,
+    }
 
     preserved = client.put(
         f"/api/weeks/{week_id}/assignments",
@@ -2320,6 +2383,10 @@ def test_confirmed_machine_leave_transfers_same_day_to_employee2_then_employee3(
     week_id = client.post(
         "/api/production-orders/generate"
     ).json()["affected_week_ids"][0]
+    assert client.post(
+        f"/api/weeks/{week_id}/resolve",
+        json={"mode": "alternate", "employee_ids": []},
+    ).status_code == 200
     assert client.post(f"/api/weeks/{week_id}/confirm").status_code == 200
     adjusted = client.post(
         f"/api/weeks/{week_id}/leave-adjustments",

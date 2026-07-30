@@ -558,6 +558,8 @@ def calculate_week(connection: sqlite3.Connection, week_id: int) -> dict[str, An
     demand_items: list[dict[str, Any]] = []
     remaining_part_ids: set[int] = set()
     remaining_hours = 0.0
+    machine_remaining_hours = 0.0
+    accessory_remaining_hours = 0.0
     total_required_hours = 0.0
     for row in demands:
         part_id = int(row["part_id"])
@@ -577,6 +579,15 @@ def calculate_week(connection: sqlite3.Connection, week_id: int) -> dict[str, An
                 * source["standard_hours"]
                 for source in sources
             )
+            for source in sources:
+                source_remaining_hours = (
+                    max(0, source["quantity"] - source["assigned_quantity"])
+                    * source["standard_hours"]
+                )
+                if source["order_type"] == "machine":
+                    machine_remaining_hours += source_remaining_hours
+                else:
+                    accessory_remaining_hours += source_remaining_hours
             unit_hours = required_part_hours / quantity if quantity else 0.0
         else:
             quantity = int(row["quantity"])
@@ -831,6 +842,10 @@ def calculate_week(connection: sqlite3.Connection, week_id: int) -> dict[str, An
         "id": int(week["id"]),
         "week_start": week["week_start"],
         "include_weekend": bool(week["include_weekend"]),
+        "machine_resolution": {
+            "allow_alternates": bool(week["allow_machine_alternates"]),
+            "allow_advance": bool(week["allow_machine_advance"]),
+        },
         "status": week["status"],
         "confirmed_at": week["confirmed_at"],
         "active_adjustment": adjustment_data,
@@ -857,6 +872,10 @@ def calculate_week(connection: sqlite3.Connection, week_id: int) -> dict[str, An
         },
         "shortage": {
             "suggestion": suggestion,
+            "machine_remaining_hours": round(machine_remaining_hours, 4),
+            "accessory_remaining_hours": round(
+                accessory_remaining_hours, 4
+            ),
             "missing_skill_parts": [
                 {
                     "part_id": part_id,
@@ -922,7 +941,9 @@ def reset_week_schedule(connection: sqlite3.Connection, week_id: int) -> None:
     connection.execute(
         """
         UPDATE week_plans
-        SET status = 'draft', confirmed_at = NULL, updated_at = CURRENT_TIMESTAMP
+        SET status = 'draft', confirmed_at = NULL,
+            allow_machine_alternates = 0, allow_machine_advance = 0,
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
         (week_id,),

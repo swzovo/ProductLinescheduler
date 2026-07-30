@@ -47,6 +47,16 @@ def test_existing_settings_table_gets_shortage_threshold_column(tmp_path, monkey
             ).fetchall()
         }
         assert "is_manual" in overtime_columns
+        week_columns = {
+            item["name"]
+            for item in migrated.execute(
+                "PRAGMA table_info(week_plans)"
+            ).fetchall()
+        }
+        assert {
+            "allow_machine_alternates",
+            "allow_machine_advance",
+        }.issubset(week_columns)
 
 
 def test_existing_employee_table_gets_work_pattern_columns(tmp_path, monkeypatch):

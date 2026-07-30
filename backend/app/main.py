@@ -168,7 +168,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="单产线整机与跨周排班系统", version="3.4.0", lifespan=lifespan)
+app = FastAPI(title="单产线整机与跨周排班系统", version="3.4.1", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -1866,14 +1866,48 @@ def resolve_shortage(week_id: int, payload: ResolveShortage):
                 status_code=409,
                 detail="请假调整任务已锁定给原员工，不能选择其他人员",
             )
-        placeholders = ",".join("?" for _ in payload.employee_ids)
-        employees = connection.execute(
-            f"SELECT * FROM employees WHERE id IN ({placeholders}) AND active = 1",
-            payload.employee_ids,
-        ).fetchall()
-        if len(employees) != len(set(payload.employee_ids)):
-            raise HTTPException(status_code=422, detail="所选人员不存在或已停用")
-        if payload.mode == "reinforcement":
+        employees = []
+        if payload.employee_ids:
+            placeholders = ",".join("?" for _ in payload.employee_ids)
+            employees = connection.execute(
+                f"SELECT * FROM employees WHERE id IN ({placeholders}) AND active = 1",
+                payload.employee_ids,
+            ).fetchall()
+            if len(employees) != len(set(payload.employee_ids)):
+                raise HTTPException(status_code=422, detail="所选人员不存在或已停用")
+        if payload.mode == "alternate":
+            connection.execute(
+                """
+                UPDATE week_plans
+                SET allow_machine_alternates = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (week_id,),
+            )
+            if connection.execute(
+                "SELECT 1 FROM production_orders WHERE status = 'active' LIMIT 1"
+            ).fetchone():
+                generate_cross_week(connection)
+            else:
+                run_generator(connection, week_id)
+        elif payload.mode == "advance":
+            connection.execute(
+                """
+                UPDATE week_plans
+                SET allow_machine_advance = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (week_id,),
+            )
+            if connection.execute(
+                "SELECT 1 FROM production_orders WHERE status = 'active' LIMIT 1"
+            ).fetchone():
+                generate_cross_week(connection)
+            else:
+                run_generator(connection, week_id)
+        elif payload.mode == "reinforcement":
             if any(row["employee_type"] != "backup" for row in employees):
                 raise HTTPException(status_code=422, detail="增援只能选择候补人员")
             connection.executemany(
@@ -1883,6 +1917,15 @@ def resolve_shortage(week_id: int, payload: ResolveShortage):
                 VALUES (?, ?, 'reinforcement')
                 """,
                 [(week_id, employee_id) for employee_id in payload.employee_ids],
+            )
+            connection.execute(
+                """
+                UPDATE week_plans
+                SET allow_machine_alternates = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (week_id,),
             )
             if connection.execute("SELECT 1 FROM production_orders WHERE status = 'active' LIMIT 1").fetchone():
                 generate_cross_week(connection)

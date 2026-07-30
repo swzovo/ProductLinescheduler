@@ -463,7 +463,7 @@ def _eligible_pairs_on_day(
     part_id: int,
     unit_minutes: int,
     priorities: dict[tuple[int, int], int],
-    priority_level: int,
+    priority_level: int | None,
 ) -> list[tuple[int, int]]:
     for week in weeks:
         if week["status"] == "confirmed":
@@ -478,8 +478,11 @@ def _eligible_pairs_on_day(
             (week_id, int(employee["id"]))
             for employee in employees_by_week.get(week_id, [])
             if part_id in skills.get(int(employee["id"]), set())
-            and priorities.get((int(employee["id"]), part_id))
-            == priority_level
+            and (
+                priority_level is None
+                or priorities.get((int(employee["id"]), part_id))
+                == priority_level
+            )
             and residual.get((week_id, int(employee["id"]), day), 0)
             >= unit_minutes
         ]
@@ -733,6 +736,26 @@ def generate_cross_week(
             previous = cumulative
         machine_target_units[int(order["id"])] = targets
 
+    def machine_policy(target_day: str) -> tuple[bool, bool]:
+        target_date = date.fromisoformat(target_day)
+        target_week = next(
+            (
+                week
+                for week in weeks
+                if date.fromisoformat(week["week_start"])
+                <= target_date
+                <= date.fromisoformat(week["week_start"])
+                + timedelta(days=6)
+            ),
+            None,
+        )
+        if target_week is None:
+            return False, False
+        return (
+            bool(target_week["allow_machine_alternates"]),
+            bool(target_week["allow_machine_advance"]),
+        )
+
     for item in items:
         item_id = int(item["id"])
         order = order_by_id[int(item["production_order_id"])]
@@ -749,17 +772,30 @@ def generate_cross_week(
                     0,
                     required - locked_by_target[(item_id, target_day)],
                 )
-                candidate_days = list(
-                    reversed(
-                        _available_work_days(
-                            weeks,
-                            today_text,
-                            target_day,
+                allow_alternates, allow_advance = machine_policy(target_day)
+                configured_levels = _configured_priority_levels(
+                    priorities, int(item["part_id"])
+                )
+                priority_levels = (
+                    configured_levels
+                    if allow_alternates
+                    else configured_levels[:1]
+                )
+                candidate_days = (
+                    list(
+                        reversed(
+                            _available_work_days(
+                                weeks,
+                                today_text,
+                                target_day,
+                            )
                         )
                     )
+                    if allow_advance
+                    else [target_day]
                 )
                 for work_day in candidate_days:
-                    for priority_level in (1, 2, 3):
+                    for priority_level in priority_levels:
                         while remaining > 0:
                             candidates = _eligible_pairs_on_day(
                                 work_day,
@@ -868,12 +904,17 @@ def generate_cross_week(
                 if target_item_id == item_id and quantity > 0
             ):
                 remaining = remaining_machine_targets[(item_id, target_day)]
-                candidate_days = list(
-                    reversed(
-                        _available_work_days(
-                            weeks, today_text, target_day
+                _, allow_advance = machine_policy(target_day)
+                candidate_days = (
+                    list(
+                        reversed(
+                            _available_work_days(
+                                weeks, today_text, target_day
+                            )
                         )
                     )
+                    if allow_advance
+                    else [target_day]
                 )
                 for work_day in candidate_days:
                     for priority_level in (1, 2, 3):

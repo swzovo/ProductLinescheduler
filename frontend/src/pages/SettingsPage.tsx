@@ -148,7 +148,7 @@ export function SettingsPage() {
                   />
                   <b>小时</b>
                 </div>
-                <small>所有员工每天只能选择不加班或完整加班一次；缺口处理中会按该班次从任务截止日期向前安排。</small>
+                <small>所有员工每天只能选择不加班或完整加班一次；整机默认只在目标日使用，提前生产必须在周排班缺口处理中另行授权。</small>
               </label>
               <label>
                 <span>建议增援的缺口阈值</span>

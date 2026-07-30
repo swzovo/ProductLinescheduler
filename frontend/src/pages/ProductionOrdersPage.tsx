@@ -316,7 +316,7 @@ export function ProductionOrdersPage({ defaultWeekStart, onOpenSchedule }: { def
   return (
     <>
       <section className="section-heading">
-        <div><span className="eyebrow">PRODUCTION REQUIREMENTS</span><h2>生产需求与跨周任务</h2><p>整机优先在目标日完成，附件订单从最早空闲日期开始填充。</p></div>
+        <div><span className="eyebrow">PRODUCTION REQUIREMENTS</span><h2>生产需求与跨周任务</h2><p>整机默认只在目标日交给首选员工，缺口由管理员决定是否改派、加班或提前；附件订单从最早空闲日期开始填充。</p></div>
         <div className="heading-actions"><button className="secondary-button" onClick={openMachinePlanImport}>导入整机周计划</button><button className="secondary-button" onClick={openImport}>导入附件表格</button><button className="secondary-button" onClick={() => openNew("accessory")}>＋ 附件订单</button><button className="primary-button" onClick={() => openNew("machine")}>＋ 整机计划</button></div>
       </section>
 

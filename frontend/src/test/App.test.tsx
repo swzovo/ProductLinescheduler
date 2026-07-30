@@ -642,6 +642,7 @@ describe("应用导航与容量展示", () => {
 
   it("技能无法覆盖缺口时显示零件编号、名称和未排数量", async () => {
     let availabilityBody: Record<string, unknown> | null = null;
+    let resolutionBody: Record<string, unknown> | null = null;
     const shortageWeek = {
       id: 6,
       week_start: "2026-07-20",
@@ -685,6 +686,15 @@ describe("应用导航与容量展示", () => {
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const path = String(input);
+        if (path === "/api/weeks/6/resolve" && init?.method === "POST") {
+          resolutionBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return Promise.resolve(
+            new Response(JSON.stringify(shortageWeek), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
         if (path === "/api/weeks/6/availability" && init?.method === "PUT") {
           availabilityBody = JSON.parse(String(init.body)) as Record<string, unknown>;
           return Promise.resolve(
@@ -723,9 +733,16 @@ describe("应用导航与容量展示", () => {
         manual: true,
       }],
     })));
-    fireEvent.click(screen.getByRole("button", { name: "查看人选" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择处理方式" }));
     expect(screen.getByText("当前员工未覆盖的零件")).toBeInTheDocument();
     expect(screen.getByText("未排 3 件")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /使用员工2\/3/ }));
+    expect(screen.getByText(/整机任务仍只安排在目标日/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "授权员工2/3并重排" }));
+    await waitFor(() => expect(resolutionBody).toEqual({
+      mode: "alternate",
+      employee_ids: [],
+    }));
   });
 
   it("零件清单提供永久删除入口", async () => {

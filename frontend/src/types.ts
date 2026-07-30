@@ -276,6 +276,10 @@ export interface WeekDetail {
   id: number;
   week_start: string;
   include_weekend: boolean;
+  machine_resolution?: {
+    allow_alternates: boolean;
+    allow_advance: boolean;
+  };
   status: WeekStatus;
   confirmed_at: string | null;
   active_adjustment: {
@@ -304,6 +308,8 @@ export interface WeekDetail {
   };
   shortage: {
     suggestion: "reinforcement" | "overtime" | "no_capacity" | "no_skill" | null;
+    machine_remaining_hours?: number;
+    accessory_remaining_hours?: number;
     missing_skill_parts: {
       part_id: number;
       part_code: string;

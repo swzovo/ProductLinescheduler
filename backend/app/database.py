@@ -131,6 +131,8 @@ CREATE TABLE IF NOT EXISTS week_plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     week_start TEXT NOT NULL UNIQUE,
     include_weekend INTEGER NOT NULL DEFAULT 0,
+    allow_machine_alternates INTEGER NOT NULL DEFAULT 0,
+    allow_machine_advance INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'draft'
         CHECK (status IN ('draft', 'shortage', 'ready', 'confirmed')),
     settings_snapshot TEXT NOT NULL,
@@ -336,6 +338,20 @@ def init_db() -> None:
         if "unavailable_weekdays" not in employee_columns:
             connection.execute(
                 "ALTER TABLE employees ADD COLUMN unavailable_weekdays TEXT NOT NULL DEFAULT '[5, 6]'"
+            )
+        week_columns = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(week_plans)"
+            ).fetchall()
+        }
+        if "allow_machine_alternates" not in week_columns:
+            connection.execute(
+                "ALTER TABLE week_plans ADD COLUMN allow_machine_alternates INTEGER NOT NULL DEFAULT 0"
+            )
+        if "allow_machine_advance" not in week_columns:
+            connection.execute(
+                "ALTER TABLE week_plans ADD COLUMN allow_machine_advance INTEGER NOT NULL DEFAULT 0"
             )
         skill_columns = {
             str(row["name"])

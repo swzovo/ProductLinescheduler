@@ -356,8 +356,14 @@ class LeaveAdjustmentCreate(BaseModel):
 
 
 class ResolveShortage(BaseModel):
-    mode: Literal["reinforcement", "overtime"]
-    employee_ids: list[int] = Field(min_length=1)
+    mode: Literal["reinforcement", "overtime", "alternate", "advance"]
+    employee_ids: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_resolution_selection(self):
+        if self.mode in {"reinforcement", "overtime"} and not self.employee_ids:
+            raise ValueError("请选择至少一名人员")
+        return self
 
 
 class ScheduleExport(BaseModel):
