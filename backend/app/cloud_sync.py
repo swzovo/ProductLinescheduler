@@ -50,10 +50,10 @@ STORAGE_MODE = os.environ.get("CLOUDBASE_STORAGE_MODE", "classic")
 MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
 MAGIC = b"PLSYNC1\x00"
 KEY_PREFIX = "PLS1."
-# cloud-v3 avoids legacy ad-hoc-signed desktop builds whose Keychain ACL can
-# block indefinitely after an application update. Existing cloud data remains
-# recoverable with the user-saved recovery key.
-KEYRING_SERVICE = "com.local.production-line-scheduler.cloud-v4"
+# The final 3.5.8 package uses a fresh namespace because the previous
+# ad-hoc-signed build bound its Keychain ACL to that exact binary. Cloud data
+# remains recoverable with the user-saved recovery key.
+KEYRING_SERVICE = "com.local.production-line-scheduler.cloud-v6"
 USER_ID_PATTERN = re.compile(r"^[^\x00-\x1f]{1,256}$")
 CLOUD_PATH_PATTERN = re.compile(r"^[^\x00-\x1f\\]{1,2048}$")
 CLOUD_API_VERSION = "2020-01-10"

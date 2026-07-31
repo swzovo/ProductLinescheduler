@@ -203,12 +203,6 @@ function normalizeResult(result: AuthResult): {
   if (!rawUser || !rawSession) {
     throw new Error("CloudBase 未返回有效登录会话");
   }
-  const id = String(
-    rawUser.id
-    ?? rawUser.uid
-    ?? rawUser.openid
-    ?? "",
-  );
   const refreshToken = String(
     rawSession.refresh_token
     ?? rawSession.refreshToken
@@ -219,9 +213,16 @@ function normalizeResult(result: AuthResult): {
     ?? rawSession.accessToken
     ?? "",
   );
+  const id = cloudUserIdentifier(rawUser, accessToken);
   if (!id || !refreshToken || !accessToken) {
     throw new Error("CloudBase 登录会话缺少用户标识或刷新令牌");
   }
+  const metadata = (
+    typeof rawUser.user_metadata === "object"
+    && rawUser.user_metadata !== null
+  )
+    ? rawUser.user_metadata as Record<string, unknown>
+    : {};
   const displayName = String(
     [
       rawUser.username,
@@ -229,6 +230,10 @@ function normalizeResult(result: AuthResult): {
       rawUser.phone,
       rawUser.phone_number,
       rawUser.name,
+      metadata.username,
+      metadata.email,
+      metadata.phone,
+      metadata.name,
     ].find(
       (value) => (
         (typeof value === "string" || typeof value === "number")
@@ -240,6 +245,58 @@ function normalizeResult(result: AuthResult): {
     user: { id, displayName },
     session: { accessToken, refreshToken },
   };
+}
+
+function primitiveText(value: unknown): string {
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  return String(value).trim();
+}
+
+function jwtClaims(accessToken: string): Record<string, unknown> {
+  const encoded = accessToken.split(".")[1];
+  if (!encoded) return {};
+  try {
+    const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+    const bytes = Uint8Array.from(
+      window.atob(padded),
+      (character) => character.charCodeAt(0),
+    );
+    const payload = JSON.parse(
+      new TextDecoder().decode(bytes),
+    ) as unknown;
+    return typeof payload === "object" && payload !== null
+      ? payload as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+export function cloudUserIdentifier(
+  rawUser: Record<string, unknown>,
+  accessToken: string,
+): string {
+  const direct = [
+    rawUser.id,
+    rawUser.uid,
+    rawUser.openid,
+    rawUser.open_id,
+    rawUser.sub,
+  ].map(primitiveText).find(Boolean);
+  if (direct) return direct;
+
+  const claims = jwtClaims(accessToken);
+  return (
+    [
+      claims.sub,
+      claims.uid,
+      claims.user_id,
+      claims.openid,
+      claims.open_id,
+    ].map(primitiveText).find(Boolean)
+    ?? ""
+  );
 }
 
 export async function signInWithPassword(
@@ -256,7 +313,11 @@ export async function signInWithPassword(
     } as never) as Promise<AuthResult>,
     "CloudBase 登录",
   );
-  return normalizeResult(result);
+  const normalized = normalizeResult(result);
+  if (normalized.user.displayName === normalized.user.id) {
+    normalized.user.displayName = identity.trim();
+  }
+  return normalized;
 }
 
 export async function refreshCloudSession(
@@ -265,15 +326,6 @@ export async function refreshCloudSession(
 ) {
   const auth = cloudApp(config).auth({ persistence: "none" });
   return restoreAuthSession(auth, session);
-}
-
-export async function renewCloudSession(config: CloudConfig) {
-  const auth = cloudApp(config).auth({ persistence: "none" });
-  const result = await withCloudTimeout(
-    auth.refreshSession() as Promise<AuthResult>,
-    "CloudBase 会话续期",
-  );
-  return normalizeResult(result);
 }
 
 export async function restoreAuthSession(

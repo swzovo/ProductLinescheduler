@@ -3,6 +3,7 @@ import {
   classicCloudFileId,
   cloudEndpointMode,
   cloudErrorMessage,
+  cloudUserIdentifier,
   isCloudStorageNotFound,
   isClassicStorageEnvironmentError,
   isClassicStorageNotFoundCode,
@@ -105,6 +106,34 @@ describe("CloudBase 云存储桶选择", () => {
 });
 
 describe("CloudBase 登录会话恢复", () => {
+  it("忽略 SDK 的函数型 id 并从访问令牌读取稳定用户编号", () => {
+    const payload = window.btoa(JSON.stringify({
+      sub: "stable-cloud-user-id",
+    }))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+
+    expect(
+      cloudUserIdentifier(
+        { id: String.prototype.sub },
+        `header.${payload}.signature`,
+      ),
+    ).toBe("stable-cloud-user-id");
+  });
+
+  it("优先使用用户对象中的有效字符串编号", () => {
+    expect(
+      cloudUserIdentifier(
+        {
+          id: String.prototype.sub,
+          uid: "user-from-profile",
+        },
+        "not-a-jwt",
+      ),
+    ).toBe("user-from-profile");
+  });
+
   it("使用安全凭据库保存的完整令牌恢复并刷新会话", async () => {
     const setSession = vi.fn().mockResolvedValue({
       data: {

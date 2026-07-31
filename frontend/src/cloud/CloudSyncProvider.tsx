@@ -21,7 +21,6 @@ import {
   isCloudStorageNotFound,
   isInvalidCloudSessionError,
   refreshCloudSession,
-  renewCloudSession,
   resolveCloudStorage,
   savePublishableKey,
   saveStorageBucketId,
@@ -148,6 +147,7 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
   const [bucketEditorOpen, setBucketEditorOpen] = useState(false);
   const syncTimer = useRef<number | null>(null);
   const syncPromise = useRef<Promise<void> | null>(null);
+  const cloudSession = useRef<CloudSession | null>(null);
 
   const saveSession = useCallback(
     async (
@@ -163,6 +163,7 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
           display_name: activeUser.displayName,
         }),
       });
+      cloudSession.current = session;
     },
     [],
   );
@@ -439,7 +440,15 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
       try {
         setBusy(true);
         setDialogError("");
-        const refreshed = await renewCloudSession(config);
+        const savedSession = cloudSession.current;
+        if (!savedSession) {
+          throw new Error("云端登录会话尚未恢复，请重新登录");
+        }
+        // auth({ persistence: "none" }) 每次都会创建独立的内存凭据库，
+        // 因此不能在这里调用一个全新的 auth.refreshSession()。始终把
+        // 钥匙串中最近一次保存的完整会话交给 setSession()，由 SDK
+        // 刷新令牌并返回下一组令牌，保证重启后的首次修改也能同步。
+        const refreshed = await refreshCloudSession(config, savedSession);
         const activeUser = {
           id: user.id,
           displayName: refreshed.user.displayName || user.displayName,
@@ -698,6 +707,7 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
       setBusy(true);
       await signOutCloud(config).catch(() => undefined);
       await api("/cloud-sync/session", { method: "DELETE" });
+      cloudSession.current = null;
       setUser(null);
       setOffline(false);
       setCenterOpen(false);
