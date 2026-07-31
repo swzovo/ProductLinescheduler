@@ -440,9 +440,13 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
         setBusy(true);
         setDialogError("");
         const refreshed = await renewCloudSession(config);
-        await saveSession(refreshed.user, refreshed.session);
-        setUser(refreshed.user);
-        await reconcile(config, refreshed.user);
+        const activeUser = {
+          id: user.id,
+          displayName: refreshed.user.displayName || user.displayName,
+        };
+        await saveSession(activeUser, refreshed.session);
+        setUser(activeUser);
+        await reconcile(config, activeUser);
       } catch (error) {
         setStatus("error");
         setStatusText(errorText(error));
@@ -576,10 +580,22 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
               },
             );
             if (cancelled) return;
-            await saveSession(refreshed.user, refreshed.session);
-            setUser(refreshed.user);
+            // CloudBase setSession() 在传统环境的恢复响应中，user.id
+            // 可能是完整用户对象而不是首次登录时的字符串 ID。钥匙串
+            // 中的 user_id 已在首次登录时验证，因此恢复和续期始终沿用
+            // 该稳定 ID，避免跨设备命名空间发生漂移。
+            const activeUser = {
+              id: saved.user_id,
+              displayName: (
+                saved.display_name
+                || refreshed.user.displayName
+                || saved.user_id
+              ),
+            };
+            await saveSession(activeUser, refreshed.session);
+            setUser(activeUser);
             setBooting(false);
-            await reconcile(loadedConfig, refreshed.user);
+            await reconcile(loadedConfig, activeUser);
             return;
           } catch (error) {
             const message = errorText(error);
