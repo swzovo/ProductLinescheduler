@@ -53,7 +53,7 @@ KEY_PREFIX = "PLS1."
 # cloud-v3 avoids legacy ad-hoc-signed desktop builds whose Keychain ACL can
 # block indefinitely after an application update. Existing cloud data remains
 # recoverable with the user-saved recovery key.
-KEYRING_SERVICE = "com.local.production-line-scheduler.cloud-v3"
+KEYRING_SERVICE = "com.local.production-line-scheduler.cloud-v4"
 USER_ID_PATTERN = re.compile(r"^[^\x00-\x1f]{1,256}$")
 CLOUD_PATH_PATTERN = re.compile(r"^[^\x00-\x1f\\]{1,2048}$")
 CLOUD_API_VERSION = "2020-01-10"
@@ -350,19 +350,28 @@ def validate_cos_storage_url(value: str) -> str:
     parsed = urlsplit(cleaned)
     hostname = (parsed.hostname or "").lower()
     expected_suffix = f".cos.{REGION}.myqcloud.com"
+    download_hostname = f"{STORAGE_BUCKET_ID}.tcb.qcloud.la".lower()
     if (
         parsed.scheme != "https"
         or parsed.username is not None
         or parsed.password is not None
         or parsed.port not in {None, 443}
-        or not hostname.endswith(expected_suffix)
+        or (
+            not hostname.endswith(expected_suffix)
+            and hostname != download_hostname
+        )
     ):
         raise ValueError("云存储地址不受信任")
     return cleaned
 
 
 def validate_cos_upload_url(value: str) -> str:
-    return validate_cos_storage_url(value)
+    cleaned = validate_cos_storage_url(value)
+    hostname = (urlsplit(cleaned).hostname or "").lower()
+    expected_suffix = f".cos.{REGION}.myqcloud.com"
+    if not hostname.endswith(expected_suffix):
+        raise ValueError("云存储上传地址不受信任")
+    return cleaned
 
 
 async def _cloud_api_call(
@@ -638,7 +647,7 @@ async def upload_to_signed_cloud_storage(
                     detail="CloudBase 返回的上传授权信息不完整",
                 )
             try:
-                trusted_url = validate_cos_storage_url(upload_url)
+                trusted_url = validate_cos_upload_url(upload_url)
             except ValueError as error:
                 _UPLOAD_STATUS.update(
                     {"stage": "url_rejected", "error": str(error)}

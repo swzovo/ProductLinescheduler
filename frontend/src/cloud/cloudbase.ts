@@ -223,11 +223,18 @@ function normalizeResult(result: AuthResult): {
     throw new Error("CloudBase 登录会话缺少用户标识或刷新令牌");
   }
   const displayName = String(
-    rawUser.username
-    || rawUser.email
-    || rawUser.phone
-    || rawUser.name
-    || id,
+    [
+      rawUser.username,
+      rawUser.email,
+      rawUser.phone,
+      rawUser.phone_number,
+      rawUser.name,
+    ].find(
+      (value) => (
+        (typeof value === "string" || typeof value === "number")
+        && String(value).trim()
+      ),
+    ) ?? id,
   );
   return {
     user: { id, displayName },

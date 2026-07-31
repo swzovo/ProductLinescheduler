@@ -14,6 +14,7 @@ from backend.app.cloud_sync import (
     generate_recovery_key,
     user_namespace,
     validate_cloud_path,
+    validate_cos_storage_url,
     validate_cos_upload_url,
 )
 from backend.app.main import app
@@ -55,6 +56,14 @@ def test_cos_upload_url_only_accepts_configured_region():
         validate_cos_upload_url(
             "https://bucket.cos.ap-guangzhou.myqcloud.com/file.plsync"
         )
+
+    download = (
+        "https://7072-production-schedule-test-d73e723-1460691865"
+        ".tcb.qcloud.la/production-scheduler/user/manifest.json"
+    )
+    assert validate_cos_storage_url(download) == download
+    with pytest.raises(ValueError, match="上传地址不受信任"):
+        validate_cos_upload_url(download)
 
 
 def test_cloud_path_is_limited_to_active_user_namespace():
