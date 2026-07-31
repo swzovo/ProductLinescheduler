@@ -10,7 +10,10 @@ if [[ ! -x ".desktop-venv/bin/python" ]]; then
 fi
 .desktop-venv/bin/python -m pip install -r requirements-desktop.txt
 
-(cd frontend && npm ci)
+if [[ ! -d "frontend/node_modules" ]]; then
+  echo "正在安装前端构建依赖..."
+  (cd frontend && npm ci)
+fi
 (cd frontend && npm run build)
 .desktop-venv/bin/python desktop/create_icon.py
 
@@ -24,8 +27,6 @@ fi
   --add-data "$PWD/frontend/dist:frontend/dist" \
   --add-data "$PWD/backend/assets:backend/assets" \
   --collect-all webview \
-  --collect-all keyring \
-  --collect-all cryptography \
   --collect-submodules scipy._external.array_api_compat \
   --distpath "release" \
   --workpath "build/desktop" \
@@ -33,8 +34,8 @@ fi
   "$PWD/desktop_launcher.py"
 
 APP_PATH="$PWD/release/产线排班系统.app"
-plutil -replace CFBundleShortVersionString -string "3.5.6" "$APP_PATH/Contents/Info.plist"
-plutil -replace CFBundleVersion -string "3.5.6" "$APP_PATH/Contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string "3.4.1" "$APP_PATH/Contents/Info.plist"
+plutil -replace CFBundleVersion -string "3.4.1" "$APP_PATH/Contents/Info.plist"
 codesign --force --deep --sign - "$APP_PATH"
 
 echo ""

@@ -6,16 +6,20 @@
 
 macOS 用户可以直接双击 `release/产线排班系统.app` 使用，不需要打开终端、启动服务器或手动访问网页。程序会在独立窗口中运行，关闭窗口后本地服务也会自动停止。
 
+3.5.0 起支持 CloudBase 账户登录和 Mac/Windows 跨设备同步。排班数据库仍优先保存在本机，云端只保存使用恢复密钥加密后的版本；断网时可选择“仅在本机使用”。第一次登录务必保存程序显示的恢复密钥，第二台设备首次登录时需要输入。详细配置见 [CloudBase 云同步启用说明](docs/CLOUDBASE_SETUP.md)。
+
+3.5.3 起桌面程序固定使用 `http://localhost:61375`，复用 CloudBase
+默认的 `localhost` 本地来源，不需要购买或添加自定义域名。
+
 桌面版数据保存在当前用户目录，不会因为重新打包或替换应用而丢失：
 
 - macOS：`~/Library/Application Support/ProductionLineScheduler/scheduler.db`
 - Windows：`%APPDATA%\ProductionLineScheduler\scheduler.db`
-// windows 终端下载方法：
+Windows 本机构建方法：
+
 ```powershell
-    Set-Location C:\ProductionLineScheduler  //根据文件名修改
-    py -3.12 -m venv .desktop-venv
-    npm.cmd --prefix .\frontend ci
-    powershell -ExecutionPolicy Bypass -File .\build_desktop.ps1
+Set-Location C:\ProductionLineScheduler
+powershell -ExecutionPolicy Bypass -File .\build_desktop.ps1
 ```
 如果桌面程序仍放在本项目的 `release` 目录中，首次运行时会自动复制原网页开发版数据库；原数据文件会保留不动。
 
@@ -33,10 +37,15 @@ Windows 需要在 Windows 电脑上运行（PyInstaller 不支持跨系统打包
 powershell -ExecutionPolicy Bypass -File .\build_desktop.ps1
 ```
 
-生成结果位于 `release` 目录。首次构建会自动安装桌面打包依赖，后续构建会复用本地环境。
+生成结果位于 `release` 目录，同时得到 `产线排班系统-Windows-x64.zip`。把这个压缩包复制到其他 Windows 10/11 电脑并解压后即可运行，目标电脑不需要 Python、Node.js 或其他编译环境。
+
+如果源码托管在 GitHub，也可以在 Actions 页面手动运行 `Build Windows desktop package`。构建完成后下载 `ProductionLineScheduler-Windows-x64` 产物即可；编译环境由 GitHub 临时提供，本机无需安装。首次本机构建会自动安装桌面打包依赖，后续构建会复用本地环境。
 
 ## 已实现功能
 
+- CloudBase 用户名、邮箱或手机号密码登录；支持 Mac 与 Windows 之间自动同步、离线本机模式和退出账户。
+- 本机 SQLite 通过一致性备份后使用 AES-256-GCM 加密上传；恢复密钥保存在 macOS 钥匙串或 Windows 凭据管理器。
+- 云端与本机同时出现不同修改时不自动覆盖，由管理员选择使用云端版本或保留本机版本；云端恢复前自动保留最近十份本机安全备份。
 - 零件、单件标准工时、员工类型和技能的自定义维护；未进入周计划的零件可永久删除。
 - 零件支持 Excel/CSV 批量预览导入，并提供带填写说明的 Excel 模板。
 - 零件可独立配置“员工1、员工2、员工3”；整机和附件依次使用三级员工在任务周期内的剩余产能。选择员工后会自动同步零件技能。

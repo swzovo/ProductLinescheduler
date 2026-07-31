@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useCloudSync } from "./cloud/CloudSyncProvider";
 import { EmployeesPage } from "./pages/EmployeesPage";
 import { PartsPage } from "./pages/PartsPage";
 import { MachinesPage } from "./pages/MachinesPage";
@@ -18,6 +19,7 @@ const NAV: { id: Page; label: string; icon: string; note: string }[] = [
 ];
 
 export default function App() {
+  const cloud = useCloudSync();
   const [page, setPage] = useState<Page>("schedule");
   const [productionWeekStart, setProductionWeekStart] = useState<string | undefined>();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -51,8 +53,13 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <span className="live-dot" />
-          本地数据已连接
+          <button className="sidebar-sync" onClick={cloud.openCenter}>
+            <span className={`live-dot ${cloud.status}`} />
+            <span>
+              <b>{cloud.user ? cloud.user.displayName : "本机数据"}</b>
+              <small>{cloud.statusText}</small>
+            </span>
+          </button>
         </div>
       </aside>
       <main>
@@ -68,13 +75,19 @@ export default function App() {
             <p>{NAV.find((item) => item.id === page)?.note}</p>
             <h1>{NAV.find((item) => item.id === page)?.label}</h1>
           </div>
-          <div className="today-chip">
-            <span>今日</span>
-            {new Intl.DateTimeFormat("zh-CN", {
-              month: "long",
-              day: "numeric",
-              weekday: "short",
-            }).format(new Date())}
+          <div className="topbar-actions">
+            <button className={`sync-chip ${cloud.status}`} onClick={cloud.openCenter}>
+              <span className={`live-dot ${cloud.status}`} />
+              {cloud.statusText}
+            </button>
+            <div className="today-chip">
+              <span>今日</span>
+              {new Intl.DateTimeFormat("zh-CN", {
+                month: "long",
+                day: "numeric",
+                weekday: "short",
+              }).format(new Date())}
+            </div>
           </div>
         </header>
         <div className="page-content">

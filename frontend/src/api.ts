@@ -31,6 +31,18 @@ export async function api<T>(
     }
     throw new ApiError(message, response.status);
   }
+  const method = (options.method ?? "GET").toUpperCase();
+  if (
+    !["GET", "HEAD", "OPTIONS"].includes(method)
+    && !path.startsWith("/cloud-sync")
+  ) {
+    window.dispatchEvent(
+      new CustomEvent("scheduler:data-mutated", {
+        detail: { path, method },
+      }),
+    );
+  }
   if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  const payload = await response.json() as T;
+  return payload;
 }

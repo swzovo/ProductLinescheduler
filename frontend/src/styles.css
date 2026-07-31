@@ -51,8 +51,16 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .sidebar nav b, .sidebar nav small { display: block; }
 .sidebar nav b { font-size: 14px; font-weight: 600; }
 .sidebar nav small { margin-top: 2px; color: #789790; font-size: 10px; }
-.sidebar-foot { margin-top: auto; padding: 13px 12px; border-top: 1px solid rgba(255,255,255,.1); color: #88a69f; font-size: 11px; }
+.sidebar-foot { margin-top: auto; padding: 13px 0 0; border-top: 1px solid rgba(255,255,255,.1); color: #88a69f; font-size: 11px; }
+.sidebar-sync { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 10px; border: 0; border-radius: 10px; color: #aac0bb; background: transparent; text-align: left; }
+.sidebar-sync:hover { background: rgba(255,255,255,.07); }
+.sidebar-sync > span:last-child { min-width: 0; display: grid; gap: 2px; }
+.sidebar-sync b, .sidebar-sync small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-sync b { color: #e3eeea; font-size: 11px; }.sidebar-sync small { color: #88a69f; font-size: 9px; }
 .live-dot { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: #6dc990; box-shadow: 0 0 0 4px rgba(109,201,144,.12); }
+.live-dot.syncing, .live-dot.checking { background: #e2ae45; box-shadow: 0 0 0 4px rgba(226,174,69,.12); }
+.live-dot.attention, .live-dot.error { background: #e16a5d; box-shadow: 0 0 0 4px rgba(225,106,93,.12); }
+.live-dot.offline { background: #82938f; box-shadow: 0 0 0 4px rgba(130,147,143,.12); }
 
 main { min-width: 0; }
 .topbar {
@@ -63,6 +71,9 @@ main { min-width: 0; }
 .topbar h1 { margin: 0; font-size: 23px; }
 .today-chip { padding: 9px 15px; border: 1px solid var(--line); border-radius: 11px; background: white; color: #495d58; font-size: 12px; }
 .today-chip span { margin-right: 8px; color: var(--orange); font-weight: 700; }
+.topbar-actions { display: flex; align-items: center; gap: 9px; }
+.sync-chip { display: inline-flex; align-items: center; max-width: 260px; height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; color: #536761; background: rgba(255,255,255,.9); text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.sync-chip .live-dot { flex: 0 0 auto; margin-right: 8px; }
 .menu-button { display: none; border: 0; background: transparent; font-size: 20px; }
 .page-content { padding: 30px 36px 54px; max-width: 1680px; margin: 0 auto; }
 
@@ -236,6 +247,47 @@ label small, .field-note { color: var(--muted); font-size: 10px; }
 .toast > span { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 50%; background: rgba(255,255,255,.15); }
 .toast button { border: 0; color: white; background: transparent; font-size: 18px; }
 @keyframes slide-in { from { transform: translateY(15px); opacity: 0; } }
+
+.cloud-gate { min-height: 100vh; display: grid; place-items: center; padding: 32px; background: radial-gradient(circle at 18% 8%, #e4eee8 0, transparent 32%), linear-gradient(145deg, #f4f6f1, #e6ece6); }
+.cloud-gate.loading { align-content: center; text-align: center; }
+.cloud-gate.loading h1 { margin: 14px 0 5px; font-size: 25px; }.cloud-gate.loading p { margin: 0; color: var(--muted); font-size: 12px; }
+.cloud-login-card { width: min(100%, 470px); padding: 34px; border: 1px solid rgba(255,255,255,.78); border-radius: 22px; background: rgba(255,255,255,.9); box-shadow: 0 28px 80px rgba(24,57,49,.14); }
+.cloud-login-brand { display: flex; align-items: center; gap: 17px; margin-bottom: 28px; }
+.cloud-logo { display: grid; place-items: center; flex: 0 0 auto; width: 58px; height: 58px; border-radius: 17px; color: #ffe2cd; background: linear-gradient(145deg, #174b42, #0c2f2a); font: 800 18px ui-monospace, SFMono-Regular, monospace; letter-spacing: .08em; box-shadow: 0 10px 24px rgba(18,61,54,.19); }
+.cloud-login-brand span { color: #78918a; font: 700 8px ui-monospace, SFMono-Regular, monospace; letter-spacing: .16em; }
+.cloud-login-brand h1 { margin: 4px 0; font-size: 25px; }.cloud-login-brand p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.cloud-login-card form { display: grid; gap: 14px; }.cloud-login-card form label, .cloud-advanced label, .recovery-input { display: grid; gap: 6px; }
+.cloud-login-card label > span, .cloud-advanced label > span, .recovery-input > span { font-size: 11px; font-weight: 700; }
+.cloud-login-submit { width: 100%; margin-top: 4px; }
+.cloud-login-card > .text-button { display: block; margin: 14px auto 0; }
+.cloud-offline-button { display: block; margin: 7px auto 0; font-size: 11px; }
+.cloud-advanced { display: grid; gap: 10px; margin-top: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: #f6f8f5; }
+.cloud-advanced p { margin: 0; color: var(--muted); font-size: 10px; }.cloud-advanced small { color: #a05642; font-size: 9px; }
+.cloud-form-error { padding: 10px 12px; border: 1px solid #edb4ad; border-radius: 9px; color: #903f37; background: #fff0ee; font-size: 10px; line-height: 1.5; }
+.cloud-center { max-width: 590px; }.recovery-dialog, .conflict-dialog { max-width: 650px; }
+.cloud-status-card { display: flex; align-items: center; gap: 12px; padding: 15px; border: 1px solid #cce0d5; border-radius: 12px; background: #f0f7f3; }
+.cloud-status-card.error, .cloud-status-card.attention { border-color: #efc1b8; background: #fff3f0; }
+.cloud-status-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 5px rgba(82,166,117,.12); }
+.cloud-status-card.error .cloud-status-dot, .cloud-status-card.attention .cloud-status-dot { background: var(--red); box-shadow: 0 0 0 5px rgba(220,100,88,.12); }
+.cloud-status-card > div { display: grid; gap: 3px; }.cloud-status-card strong { font-size: 13px; }.cloud-status-card small { color: var(--muted); font-size: 10px; }
+.cloud-account-detail { display: grid; gap: 0; margin: 16px 0; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; }
+.cloud-account-detail > div { display: grid; grid-template-columns: 105px 1fr; padding: 10px 12px; border-top: 1px solid var(--line); font-size: 10px; }.cloud-account-detail > div:first-child { border-top: 0; }
+.cloud-account-detail dt { color: var(--muted); }.cloud-account-detail dd { margin: 0; overflow-wrap: anywhere; }
+.cloud-inline-action { margin-left: 10px; font-size: 9px; }
+.cloud-storage-mode { margin-left: 8px; padding: 2px 6px; border-radius: 999px; color: #55706a; background: #eaf2ee; font-size: 8px; white-space: nowrap; }
+.cloud-bucket-editor { display: grid; gap: 9px; margin: -4px 0 16px; padding: 13px; border: 1px solid var(--line); border-radius: 11px; background: #f6f8f5; }
+.cloud-bucket-editor label { display: grid; gap: 6px; }
+.cloud-bucket-editor label > span { font-size: 10px; font-weight: 700; }
+.cloud-bucket-editor small { color: var(--muted); font-size: 9px; line-height: 1.5; }
+.cloud-bucket-editor .secondary-button { justify-self: end; }
+.recovery-dialog p, .conflict-dialog p { margin: 0 0 16px; color: var(--muted); font-size: 11px; line-height: 1.75; }
+.recovery-key-box { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 12px; border: 1px solid #c9d9d0; border-radius: 11px; background: #eef5f1; }
+.recovery-key-box code { min-width: 0; overflow-wrap: anywhere; color: #17483e; font-size: 11px; line-height: 1.5; }
+.recovery-confirm { margin-top: 14px; padding: 11px; border-radius: 9px; background: #f7f8f5; }
+.recovery-input { margin-bottom: 14px; }
+.conflict-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.conflict-options button { min-height: 86px; display: flex; flex-direction: column; align-items: flex-start; text-align: left; }
+.conflict-options button small { margin-top: 6px; font-size: 9px; line-height: 1.45; opacity: .8; }
 
 .summary-strip { display: grid; grid-template-columns: repeat(4, 1fr); margin-bottom: 18px; border: 1px solid #d9e1db; border-radius: 14px; background: white; box-shadow: var(--shadow); overflow: hidden; }
 .summary-strip.compact { grid-template-columns: repeat(3, 1fr); }
@@ -456,6 +508,7 @@ label small, .field-note { color: var(--muted); font-size: 10px; }
   .sidebar.open { left: 0; }
   .menu-button { display: block; }
   .topbar { justify-content: flex-start; gap: 15px; padding: 0 20px; }
+  .topbar-actions { margin-left: auto; }
   .today-chip { margin-left: auto; }
   .page-content { padding: 24px 20px 44px; }
   .settings-layout { grid-template-columns: 1fr; }
@@ -495,4 +548,6 @@ label small, .field-note { color: var(--muted); font-size: 10px; }
   .modal-backdrop { padding: 0; place-items: end center; }
   .modal { max-height: 92vh; border-radius: 18px 18px 0 0; }
   .import-guide { align-items: stretch; flex-direction: column; }
+  .conflict-options, .recovery-key-box { grid-template-columns: 1fr; }
+  .recovery-key-box .secondary-button { width: 100%; }
 }

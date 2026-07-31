@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIR = ROOT / "desktop" / "assets"
 ICONSET = ASSET_DIR / "app.iconset"
 OUTPUT = ASSET_DIR / "app.png"
+WINDOWS_OUTPUT = ASSET_DIR / "app.ico"
 
 
 def make_base_icon() -> Image.Image:
@@ -55,7 +56,12 @@ def main() -> None:
         shutil.rmtree(ICONSET)
     base = make_base_icon()
     base.save(OUTPUT)
-    print(OUTPUT)
+    base.save(
+        WINDOWS_OUTPUT,
+        format="ICO",
+        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
+    print(f"{OUTPUT}\n{WINDOWS_OUTPUT}")
 
 
 if __name__ == "__main__":

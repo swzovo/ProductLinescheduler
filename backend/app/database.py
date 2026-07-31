@@ -5,14 +5,17 @@ import os
 import shutil
 import sqlite3
 import sys
+import tempfile
+import threading
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = BASE_DIR / "data" / "scheduler.db"
+DATABASE_LOCK = threading.RLock()
 
 
 def user_data_directory() -> Path:
@@ -62,15 +65,107 @@ def connect() -> sqlite3.Connection:
 
 @contextmanager
 def transaction() -> Iterator[sqlite3.Connection]:
-    connection = connect()
+    with DATABASE_LOCK:
+        connection = connect()
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+
+def create_consistent_backup(target: Path) -> Path:
+    """使用 SQLite Backup API 生成包含 WAL 内容的一致性数据库快照。"""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with DATABASE_LOCK:
+        source = connect()
+        backup = sqlite3.connect(target)
+        try:
+            source.backup(backup)
+            backup.commit()
+        finally:
+            backup.close()
+            source.close()
+    return target
+
+
+def temporary_database_backup(prefix: str = "scheduler-sync-") -> Path:
+    path = database_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        prefix=prefix,
+        suffix=".db",
+        dir=path.parent,
+        delete=False,
+    )
+    target = Path(handle.name)
+    handle.close()
+    return create_consistent_backup(target)
+
+
+def validate_database_snapshot(path: Path) -> None:
+    """确认解密后的文件是完整且属于本程序的 SQLite 数据库。"""
+    required_tables = {
+        "settings",
+        "parts",
+        "employees",
+        "week_plans",
+        "assignments",
+        "production_orders",
+    }
     try:
-        yield connection
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
-    finally:
-        connection.close()
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()
+            if integrity is None or str(integrity[0]).lower() != "ok":
+                raise ValueError("数据库完整性校验未通过")
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        finally:
+            connection.close()
+    except sqlite3.DatabaseError as error:
+        raise ValueError("文件不是有效的排班数据库") from error
+    missing = sorted(required_tables - tables)
+    if missing:
+        raise ValueError(f"数据库缺少必要数据表：{', '.join(missing)}")
+
+
+def install_database_snapshot(snapshot: Path) -> Path | None:
+    """原子替换本机数据库，并在替换前保留最近十份安全备份。"""
+    validate_database_snapshot(snapshot)
+    target = database_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    backup_path: Path | None = None
+    with DATABASE_LOCK:
+        if target.exists():
+            backup_dir = target.parent / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            backup_path = backup_dir / f"scheduler-before-cloud-{stamp}.db"
+            create_consistent_backup(backup_path)
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{target}{suffix}")
+            if sidecar.exists():
+                sidecar.unlink()
+        snapshot.replace(target)
+        init_db()
+
+        if backup_path is not None:
+            backups = sorted(
+                backup_path.parent.glob("scheduler-before-cloud-*.db"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for expired in backups[10:]:
+                expired.unlink(missing_ok=True)
+    return backup_path
 
 
 SCHEMA = """

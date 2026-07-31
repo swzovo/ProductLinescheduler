@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .database import connect, init_db, transaction
+from .cloud_sync import router as cloud_sync_router
 from .order_import import preview_accessory_order_import
 from .matrix_import import (
     preview_machine_bom_matrix,
@@ -168,7 +169,8 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="单产线整机与跨周排班系统", version="3.4.1", lifespan=lifespan)
+app = FastAPI(title="单产线整机与跨周排班系统", version="3.5.6", lifespan=lifespan)
+app.include_router(cloud_sync_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
