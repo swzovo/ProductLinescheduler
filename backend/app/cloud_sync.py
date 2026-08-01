@@ -169,14 +169,25 @@ def _read_test_secrets() -> dict[str, str]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _credential_store():
+    import keyring
+
+    if platform.system() == "Windows":
+        # Frozen Windows builds cannot always discover keyring's backend
+        # entry point. Select WinVault explicitly so credentials are stored in
+        # Windows Credential Manager instead of falling back to FailKeyring.
+        from keyring.backends.Windows import WinVaultKeyring
+
+        return WinVaultKeyring()
+    return keyring.get_keyring()
+
+
 def _get_secret(account: str) -> str | None:
     test_path = _test_secret_store_path()
     if test_path is not None:
         return _read_test_secrets().get(account)
     try:
-        import keyring
-
-        return keyring.get_password(KEYRING_SERVICE, account)
+        return _credential_store().get_password(KEYRING_SERVICE, account)
     except Exception as error:
         raise HTTPException(
             status_code=503,
@@ -196,9 +207,7 @@ def _set_secret(account: str, value: str) -> None:
         )
         return
     try:
-        import keyring
-
-        keyring.set_password(KEYRING_SERVICE, account, value)
+        _credential_store().set_password(KEYRING_SERVICE, account, value)
     except Exception as error:
         raise HTTPException(
             status_code=503,
@@ -221,7 +230,7 @@ def _delete_secret(account: str) -> None:
         import keyring
 
         try:
-            keyring.delete_password(KEYRING_SERVICE, account)
+            _credential_store().delete_password(KEYRING_SERVICE, account)
         except keyring.errors.PasswordDeleteError:
             pass
     except Exception as error:

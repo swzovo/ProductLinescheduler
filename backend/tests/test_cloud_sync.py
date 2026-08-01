@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import httpx
@@ -40,6 +42,27 @@ def test_recovery_key_encrypts_and_authenticates_snapshot():
     assert decrypt_snapshot(encrypted, recovery_key) == plain
     with pytest.raises(ValueError, match="恢复密钥不正确"):
         decrypt_snapshot(encrypted, generate_recovery_key())
+
+
+def test_windows_credential_store_uses_winvault(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeWinVaultKeyring:
+        pass
+
+    fake_module = types.ModuleType("keyring.backends.Windows")
+    fake_module.WinVaultKeyring = FakeWinVaultKeyring
+    monkeypatch.setitem(
+        sys.modules,
+        "keyring.backends.Windows",
+        fake_module,
+    )
+    monkeypatch.setattr(cloud_sync.platform, "system", lambda: "Windows")
+
+    assert isinstance(
+        cloud_sync._credential_store(),
+        FakeWinVaultKeyring,
+    )
 
 
 def test_cos_upload_url_only_accepts_configured_region():
