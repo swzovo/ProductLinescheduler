@@ -7,7 +7,7 @@ if (-not (Test-Path ".desktop-venv\Scripts\python.exe")) {
     py -3.12 -m venv .desktop-venv
 }
 & .desktop-venv\Scripts\python.exe -m pip install -r requirements-desktop.txt
-& .desktop-venv\Scripts\python.exe -c "from keyring.backends.Windows import WinVaultKeyring; assert WinVaultKeyring.priority > 0; print('Windows Credential Manager backend: OK')"
+& .desktop-venv\Scripts\python.exe -c "from backend.app.cloud_sync import _windows_dpapi_protect, _windows_dpapi_unprotect; value=b'build-check'; assert _windows_dpapi_unprotect(_windows_dpapi_protect(value)) == value; print('Windows native DPAPI: OK')"
 
 Push-Location frontend
 Write-Host "正在安装已锁定的前端构建依赖..."
@@ -26,7 +26,6 @@ Pop-Location
     --add-data "$PSScriptRoot\backend\assets;backend/assets" `
     --collect-all webview `
     --collect-all keyring `
-    --collect-all win32ctypes `
     --collect-all cryptography `
     --collect-submodules scipy._external.array_api_compat `
     --distpath "release" `

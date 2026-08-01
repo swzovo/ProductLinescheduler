@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
-import types
 from pathlib import Path
 
 import httpx
@@ -44,25 +42,33 @@ def test_recovery_key_encrypts_and_authenticates_snapshot():
         decrypt_snapshot(encrypted, generate_recovery_key())
 
 
-def test_windows_credential_store_uses_winvault(
+def test_windows_credential_store_uses_dpapi(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ):
-    class FakeWinVaultKeyring:
-        pass
-
-    fake_module = types.ModuleType("keyring.backends.Windows")
-    fake_module.WinVaultKeyring = FakeWinVaultKeyring
-    monkeypatch.setitem(
-        sys.modules,
-        "keyring.backends.Windows",
-        fake_module,
-    )
+    monkeypatch.setenv("SCHEDULER_DB_PATH", str(tmp_path / "scheduler.db"))
+    monkeypatch.delenv("SCHEDULER_TEST_SECRET_STORE", raising=False)
     monkeypatch.setattr(cloud_sync.platform, "system", lambda: "Windows")
-
-    assert isinstance(
-        cloud_sync._credential_store(),
-        FakeWinVaultKeyring,
+    monkeypatch.setattr(
+        cloud_sync,
+        "_windows_dpapi_protect",
+        lambda value: b"protected:" + value,
     )
+    monkeypatch.setattr(
+        cloud_sync,
+        "_windows_dpapi_unprotect",
+        lambda value: value.removeprefix(b"protected:"),
+    )
+
+    store = cloud_sync._credential_store()
+    assert isinstance(store, cloud_sync._WindowsDpapiStore)
+    store.set_password("test-service", "test-account", "secret-value")
+    assert store.get_password("test-service", "test-account") == "secret-value"
+    assert "secret-value" not in (
+        cloud_sync._windows_dpapi_store_path().read_text(encoding="utf-8")
+    )
+    store.delete_password("test-service", "test-account")
+    assert store.get_password("test-service", "test-account") is None
 
 
 def test_cos_upload_url_only_accepts_configured_region():

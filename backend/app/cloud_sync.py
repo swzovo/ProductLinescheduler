@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -169,17 +170,187 @@ def _read_test_secrets() -> dict[str, str]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _windows_dpapi_store_path() -> Path:
+    return database_path().parent / "cloud_sync_credentials.dpapi.json"
+
+
+def _windows_dpapi_protect(value: bytes) -> bytes:
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [
+            ("size", wintypes.DWORD),
+            ("data", ctypes.POINTER(ctypes.c_ubyte)),
+        ]
+
+    def blob(payload: bytes):
+        buffer = (ctypes.c_ubyte * len(payload)).from_buffer_copy(payload)
+        return DataBlob(len(payload), buffer), buffer
+
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(DataBlob),
+        wintypes.LPCWSTR,
+        ctypes.POINTER(DataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(DataBlob),
+    ]
+    crypt32.CryptProtectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    input_blob, input_buffer = blob(value)
+    entropy_blob, entropy_buffer = blob(
+        hashlib.sha256(KEYRING_SERVICE.encode("utf-8")).digest()
+    )
+    output_blob = DataBlob()
+    if not crypt32.CryptProtectData(
+        ctypes.byref(input_blob),
+        "产线排班系统云同步密钥",
+        ctypes.byref(entropy_blob),
+        None,
+        None,
+        0x01,  # CRYPTPROTECT_UI_FORBIDDEN
+        ctypes.byref(output_blob),
+    ):
+        code = ctypes.get_last_error()
+        raise OSError(code, ctypes.FormatError(code))
+    # Keep the input buffers alive until the native call has returned.
+    del input_buffer, entropy_buffer
+    try:
+        return ctypes.string_at(output_blob.data, output_blob.size)
+    finally:
+        kernel32.LocalFree(ctypes.cast(output_blob.data, ctypes.c_void_p))
+
+
+def _windows_dpapi_unprotect(value: bytes) -> bytes:
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [
+            ("size", wintypes.DWORD),
+            ("data", ctypes.POINTER(ctypes.c_ubyte)),
+        ]
+
+    def blob(payload: bytes):
+        buffer = (ctypes.c_ubyte * len(payload)).from_buffer_copy(payload)
+        return DataBlob(len(payload), buffer), buffer
+
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(DataBlob),
+        ctypes.c_void_p,
+        ctypes.POINTER(DataBlob),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(DataBlob),
+    ]
+    crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    input_blob, input_buffer = blob(value)
+    entropy_blob, entropy_buffer = blob(
+        hashlib.sha256(KEYRING_SERVICE.encode("utf-8")).digest()
+    )
+    output_blob = DataBlob()
+    if not crypt32.CryptUnprotectData(
+        ctypes.byref(input_blob),
+        None,
+        ctypes.byref(entropy_blob),
+        None,
+        None,
+        0x01,  # CRYPTPROTECT_UI_FORBIDDEN
+        ctypes.byref(output_blob),
+    ):
+        code = ctypes.get_last_error()
+        raise OSError(code, ctypes.FormatError(code))
+    # Keep the input buffers alive until the native call has returned.
+    del input_buffer, entropy_buffer
+    try:
+        return ctypes.string_at(output_blob.data, output_blob.size)
+    finally:
+        kernel32.LocalFree(ctypes.cast(output_blob.data, ctypes.c_void_p))
+
+
+class _WindowsDpapiStore:
+    """Small keyring-compatible store protected by Windows DPAPI."""
+
+    @staticmethod
+    def _entry_key(service: str, account: str) -> str:
+        return hashlib.sha256(
+            f"{service}\0{account}".encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _read() -> dict[str, str]:
+        path = _windows_dpapi_store_path()
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        credentials = payload.get("credentials")
+        return credentials if isinstance(credentials, dict) else {}
+
+    @staticmethod
+    def _write(credentials: dict[str, str]) -> None:
+        path = _windows_dpapi_store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(
+                {"version": 1, "credentials": credentials},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
+    def get_password(self, service: str, account: str) -> str | None:
+        encoded = self._read().get(self._entry_key(service, account))
+        if not encoded:
+            return None
+        encrypted = base64.b64decode(encoded, validate=True)
+        return _windows_dpapi_unprotect(encrypted).decode("utf-8")
+
+    def set_password(self, service: str, account: str, value: str) -> None:
+        credentials = self._read()
+        encrypted = _windows_dpapi_protect(value.encode("utf-8"))
+        credentials[self._entry_key(service, account)] = base64.b64encode(
+            encrypted
+        ).decode("ascii")
+        self._write(credentials)
+
+    def delete_password(self, service: str, account: str) -> None:
+        credentials = self._read()
+        credentials.pop(self._entry_key(service, account), None)
+        self._write(credentials)
+
+
 def _credential_store():
+    if platform.system() == "Windows":
+        # Use native, user-scoped DPAPI directly. It remains available in a
+        # frozen executable and avoids keyring backend discovery failures.
+        return _WindowsDpapiStore()
     import keyring
 
-    if platform.system() == "Windows":
-        # Frozen Windows builds cannot always discover keyring's backend
-        # entry point. Select WinVault explicitly so credentials are stored in
-        # Windows Credential Manager instead of falling back to FailKeyring.
-        from keyring.backends.Windows import WinVaultKeyring
-
-        return WinVaultKeyring()
     return keyring.get_keyring()
+
+
+def _credential_store_error(action: str, error: Exception) -> str:
+    message = f"系统安全凭据存储不可用，无法{action}云同步密钥"
+    if platform.system() != "Windows":
+        return message
+    reason = str(error).strip() or type(error).__name__
+    return f"{message}（Windows DPAPI：{reason[:240]}）"
 
 
 def _get_secret(account: str) -> str | None:
@@ -191,7 +362,7 @@ def _get_secret(account: str) -> str | None:
     except Exception as error:
         raise HTTPException(
             status_code=503,
-            detail="系统安全凭据存储不可用，无法读取云同步密钥",
+            detail=_credential_store_error("读取", error),
         ) from error
 
 
@@ -211,7 +382,7 @@ def _set_secret(account: str, value: str) -> None:
     except Exception as error:
         raise HTTPException(
             status_code=503,
-            detail="系统安全凭据存储不可用，无法保存云同步密钥",
+            detail=_credential_store_error("保存", error),
         ) from error
 
 
@@ -236,7 +407,7 @@ def _delete_secret(account: str) -> None:
     except Exception as error:
         raise HTTPException(
             status_code=503,
-            detail="系统安全凭据存储不可用，无法删除云同步密钥",
+            detail=_credential_store_error("删除", error),
         ) from error
 
 
