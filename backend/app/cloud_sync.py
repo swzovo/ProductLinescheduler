@@ -8,7 +8,9 @@ import os
 import platform
 import re
 import secrets
+import ssl
 import tempfile
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -474,6 +476,64 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _windows_system_proxy() -> str | None:
+    if platform.system() != "Windows":
+        return None
+    try:
+        proxies = urllib.request.getproxies()
+    except OSError:
+        return None
+    value = proxies.get("https") or proxies.get("http")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    cleaned = value.strip()
+    return cleaned if "://" in cleaned else f"http://{cleaned}"
+
+
+def _cloud_http_client_options(timeout_seconds: float) -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "timeout": httpx.Timeout(timeout_seconds, connect=15.0),
+        "follow_redirects": False,
+    }
+    if platform.system() != "Windows":
+        return options
+
+    # WebView automatically honors the Windows proxy and certificate store,
+    # while HTTPX otherwise only reads *_PROXY environment variables and a
+    # bundled CA file. Match the backend connection to the browser behavior.
+    proxy = _windows_system_proxy()
+    if proxy:
+        options["proxy"] = proxy
+    try:
+        import truststore
+
+        options["verify"] = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except ImportError:
+        # Source installations may not have the optional Windows dependency;
+        # keep the standard HTTPX verification rather than disabling TLS.
+        pass
+    return options
+
+
+def _cloud_http_client(timeout_seconds: float) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        **_cloud_http_client_options(timeout_seconds),
+    )
+
+
+def _network_error_detail(error: Exception) -> str:
+    details: list[str] = []
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        message = str(current).strip()
+        label = type(current).__name__
+        details.append(f"{label}: {message}" if message else label)
+        current = current.__cause__ or current.__context__
+    return " → ".join(details)[:500]
+
+
 def _decode_saved_session(value: str) -> dict[str, str | None]:
     try:
         payload = json.loads(value)
@@ -584,7 +644,7 @@ async def _cloud_api_call(
     except (httpx.HTTPError, ValueError) as error:
         raise HTTPException(
             status_code=502,
-            detail=f"连接 CloudBase 失败：{error.__class__.__name__}",
+            detail=f"连接 CloudBase 失败：{_network_error_detail(error)}",
         ) from error
     if not isinstance(response, dict):
         raise HTTPException(status_code=502, detail="CloudBase 返回格式不正确")
@@ -667,10 +727,7 @@ async def cloud_storage_info(
         trusted_path = validate_cloud_path(path, user_id)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(25.0, connect=15.0),
-        follow_redirects=False,
-    ) as client:
+    async with _cloud_http_client(25.0) as client:
         item = await _cloud_download_info(
             client,
             access_token,
@@ -698,10 +755,7 @@ async def download_from_cloud_storage(
         trusted_path = validate_cloud_path(path, user_id)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(40.0, connect=15.0),
-        follow_redirects=False,
-    ) as client:
+    async with _cloud_http_client(40.0) as client:
         item = await _cloud_download_info(
             client,
             access_token,
@@ -733,7 +787,10 @@ async def download_from_cloud_storage(
         except httpx.HTTPError as error:
             raise HTTPException(
                 status_code=502,
-                detail=f"下载云端文件失败：{error.__class__.__name__}",
+                detail=(
+                    "下载云端文件失败："
+                    f"{_network_error_detail(error)}"
+                ),
             ) from error
     if len(result.content) > MAX_SNAPSHOT_BYTES:
         raise HTTPException(status_code=413, detail="云端文件超过大小限制")
@@ -784,10 +841,7 @@ async def upload_to_signed_cloud_storage(
         raise HTTPException(status_code=413, detail="云同步快照超过大小限制")
 
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(40.0, connect=15.0),
-            follow_redirects=False,
-        ) as client:
+        async with _cloud_http_client(40.0) as client:
             _UPLOAD_STATUS.update({"stage": "requesting_cloud_authorization"})
             metadata_response = await _cloud_api_call(
                 client,
@@ -859,7 +913,10 @@ async def upload_to_signed_cloud_storage(
         )
         raise HTTPException(
             status_code=502,
-            detail=f"连接腾讯云存储失败：{error.__class__.__name__}",
+            detail=(
+                "连接腾讯云存储失败："
+                f"{_network_error_detail(error)}"
+            ),
         ) from error
     if not 200 <= result.status_code < 300:
         _UPLOAD_STATUS.update(

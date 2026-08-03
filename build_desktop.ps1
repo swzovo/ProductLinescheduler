@@ -26,6 +26,7 @@ Pop-Location
     --add-data "$PSScriptRoot\backend\assets;backend/assets" `
     --collect-all webview `
     --collect-all keyring `
+    --collect-all truststore `
     --collect-all cryptography `
     --collect-submodules scipy._external.array_api_compat `
     --distpath "release" `

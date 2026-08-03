@@ -71,6 +71,37 @@ def test_windows_credential_store_uses_dpapi(
     assert store.get_password("test-service", "test-account") is None
 
 
+def test_windows_cloud_client_uses_system_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(cloud_sync.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        cloud_sync.urllib.request,
+        "getproxies",
+        lambda: {"https": "proxy.example.test:8080"},
+    )
+
+    options = cloud_sync._cloud_http_client_options(25.0)
+
+    assert options["proxy"] == "http://proxy.example.test:8080"
+    assert options["follow_redirects"] is False
+    assert options["timeout"].connect == 15.0
+
+
+def test_network_error_detail_includes_nested_cause():
+    try:
+        try:
+            raise OSError(11001, "host not found")
+        except OSError as cause:
+            raise httpx.ConnectError("connection failed") from cause
+    except httpx.ConnectError as error:
+        detail = cloud_sync._network_error_detail(error)
+
+    assert "ConnectError: connection failed" in detail
+    assert "OSError" in detail
+    assert "host not found" in detail
+
+
 def test_cos_upload_url_only_accepts_configured_region():
     valid = (
         "https://7072-production-schedule-test-d73e723-1460691865"
