@@ -294,6 +294,36 @@ def test_snapshot_restore_replaces_database_and_keeps_safety_backup(
     assert snapshot.headers["x-database-sha256"]
     assert snapshot.content.startswith(b"PLSYNC1\x00")
 
+    validated = cloud_client.post(
+        f"/api/cloud-sync/key/validate?user_id={user_id}",
+        data={"recovery_key": key_response.json()["recovery_key"]},
+        files={
+            "snapshot": (
+                "revision.plsync",
+                snapshot.content,
+                "application/octet-stream",
+            )
+        },
+    )
+    assert validated.status_code == 200
+    assert validated.json()["plain_sha256"] == (
+        snapshot.headers["x-database-sha256"]
+    )
+
+    rejected_key = cloud_client.post(
+        f"/api/cloud-sync/key/validate?user_id={user_id}",
+        data={"recovery_key": generate_recovery_key()},
+        files={
+            "snapshot": (
+                "revision.plsync",
+                snapshot.content,
+                "application/octet-stream",
+            )
+        },
+    )
+    assert rejected_key.status_code == 422
+    assert "恢复密钥不正确" in rejected_key.json()["detail"]
+
     second = cloud_client.post(
         "/api/parts",
         json={

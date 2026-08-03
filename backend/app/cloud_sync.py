@@ -36,6 +36,7 @@ from .database import (
     database_path,
     install_database_snapshot,
     temporary_database_backup,
+    validate_database_snapshot,
 )
 
 
@@ -1032,6 +1033,47 @@ def import_recovery_key(payload: RecoveryKeyPayload):
         payload.recovery_key.strip(),
     )
     return {"status": "saved"}
+
+
+@router.post("/key/validate")
+async def validate_recovery_key_for_snapshot(
+    user_id: str = Query(min_length=1, max_length=256),
+    recovery_key: str = Form(min_length=20, max_length=200),
+    snapshot: UploadFile = File(...),
+):
+    _validate_user_id(user_id)
+    encrypted = await snapshot.read(MAX_SNAPSHOT_BYTES + 65)
+    if len(encrypted) > MAX_SNAPSHOT_BYTES + 64:
+        raise HTTPException(status_code=413, detail="云端备份超过验证大小限制")
+    try:
+        plain = decrypt_snapshot(encrypted, recovery_key)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    target = database_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        prefix="scheduler-key-check-",
+        suffix=".db",
+        dir=target.parent,
+        delete=False,
+    )
+    temporary = Path(handle.name)
+    try:
+        handle.write(plain)
+        handle.flush()
+        handle.close()
+        validate_database_snapshot(temporary)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    finally:
+        if not handle.closed:
+            handle.close()
+        temporary.unlink(missing_ok=True)
+    return {
+        "valid": True,
+        "plain_sha256": _sha256(plain),
+    }
 
 
 @router.delete("/key", status_code=204)

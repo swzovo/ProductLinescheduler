@@ -100,6 +100,25 @@ function errorText(error: unknown): string {
   return cloudErrorMessage(error);
 }
 
+
+async function responseErrorText(
+  response: Response,
+  fallback: string,
+): Promise<string> {
+  const raw = await response.text().catch(() => "");
+  let detail = "";
+  try {
+    const payload = JSON.parse(raw) as { detail?: unknown };
+    if (typeof payload.detail === "string") detail = payload.detail;
+  } catch {
+    detail = raw.trim().slice(0, 240);
+  }
+  return detail
+    ? `${fallback}（HTTP ${response.status}）：${detail}`
+    : `${fallback}（HTTP ${response.status}）`;
+}
+
+
 async function waitAtMost<T>(
   operation: Promise<T>,
   milliseconds: number,
@@ -138,6 +157,7 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
   const [recoveryKey, setRecoveryKey] = useState("");
   const [recoveryConfirmed, setRecoveryConfirmed] = useState(false);
   const [recoveryIsNew, setRecoveryIsNew] = useState(false);
+  const [recoveryReplacing, setRecoveryReplacing] = useState(false);
   const [dialogError, setDialogError] = useState("");
   const [busy, setBusy] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -339,19 +359,7 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
         { method: "POST", body: form },
       );
       if (!response.ok) {
-        const raw = await response.text().catch(() => "");
-        let detail = "";
-        try {
-          const payload = JSON.parse(raw) as { detail?: unknown };
-          if (typeof payload.detail === "string") detail = payload.detail;
-        } catch {
-          detail = raw.trim().slice(0, 240);
-        }
-        throw new Error(
-          detail
-            ? `云端数据恢复失败（HTTP ${response.status}）：${detail}`
-            : `云端数据恢复失败（HTTP ${response.status}）`,
-        );
+        throw new Error(await responseErrorText(response, "云端数据恢复失败"));
       }
       await saveLocalState(activeUser, revision);
       setStatus("synced");
@@ -382,6 +390,7 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
       );
       if (!key.available) {
         if (manifest) {
+          setRecoveryReplacing(false);
           setDialog("recovery-import");
           setStatus("attention");
           setStatusText("需要恢复密钥才能读取云端数据");
@@ -493,6 +502,27 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
     try {
       setBusy(true);
       setDialogError("");
+      const local = await api<LocalState>(
+        `/cloud-sync/state?user_id=${encodeURIComponent(user.id)}`,
+      );
+      const manifest = await getManifest(config, local.user_namespace);
+      const remote = currentRevision(manifest);
+      if (!remote) throw new Error("云端没有可用于验证密钥的数据版本");
+      const files = await cloudFiles(config);
+      const downloaded = await files.download(remote.snapshot_path);
+      if (downloaded.error) throw downloaded.error;
+      const form = new FormData();
+      form.append("recovery_key", recoveryKey.trim());
+      form.append("snapshot", downloaded.data, `${remote.id}.plsync`);
+      const validation = await fetch(
+        `/api/cloud-sync/key/validate?user_id=${encodeURIComponent(user.id)}`,
+        { method: "POST", body: form },
+      );
+      if (!validation.ok) {
+        throw new Error(
+          await responseErrorText(validation, "恢复密钥验证失败"),
+        );
+      }
       await api("/cloud-sync/key/import", {
         method: "POST",
         body: JSON.stringify({
@@ -502,13 +532,34 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
       });
       setDialog("none");
       setRecoveryKey("");
+      setRecoveryReplacing(false);
       await reconcile(config, user);
     } catch (error) {
       setDialogError(errorText(error));
     } finally {
       setBusy(false);
     }
-  }, [config, reconcile, recoveryKey, user]);
+  }, [config, getManifest, reconcile, recoveryKey, user]);
+
+  const beginRecoveryKeyReplacement = useCallback(async () => {
+    if (!user) return;
+    try {
+      setBusy(true);
+      setDialogError("");
+      setRecoveryKey("");
+      setRecoveryConfirmed(false);
+      setRecoveryIsNew(false);
+      setRecoveryReplacing(true);
+      setCenterOpen(false);
+      setDialog("recovery-import");
+      setStatus("attention");
+      setStatusText("请输入能够解密云端最新数据的恢复密钥");
+    } catch (error) {
+      setDialogError(errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }, [user]);
 
   const chooseRemote = useCallback(async () => {
     if (!config || !user) return;
@@ -557,6 +608,7 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
       setRecoveryKey(saved.recovery_key);
       setRecoveryConfirmed(false);
       setRecoveryIsNew(false);
+      setRecoveryReplacing(false);
       setCenterOpen(false);
       setDialog("recovery-created");
     } catch (error) {
@@ -954,6 +1006,11 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
                     查看恢复密钥
                   </button>
                 )}
+                {user && (
+                  <button className="secondary-button" disabled={busy} onClick={() => void beginRecoveryKeyReplacement()}>
+                    更换恢复密钥
+                  </button>
+                )}
                 {user ? (
                   <button className="ghost-button danger" disabled={busy} onClick={() => void logout()}>
                     退出账户
@@ -1034,12 +1091,16 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
           <div className="modal recovery-dialog">
             <div className="modal-header">
               <div>
-                <span className="eyebrow">NEW DEVICE</span>
-                <h2>输入恢复密钥</h2>
+                <span className="eyebrow">{recoveryReplacing ? "REPLACE KEY" : "NEW DEVICE"}</span>
+                <h2>{recoveryReplacing ? "更换恢复密钥" : "输入恢复密钥"}</h2>
               </div>
             </div>
             <div className="modal-content">
-              <p>此账户已有加密云端数据。请输入在第一台设备保存的恢复密钥，完成后会自动恢复最新排班。</p>
+              <p>
+                {recoveryReplacing
+                  ? "请输入与云端最新版本匹配的恢复密钥。系统会先实际解密并校验数据库，验证成功后才保存。"
+                  : "此账户已有加密云端数据。请输入在第一台设备保存的恢复密钥，系统验证成功后会自动恢复最新排班。"}
+              </p>
               <label className="recovery-input">
                 <span>恢复密钥</span>
                 <input
@@ -1085,6 +1146,13 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
                   <small>把本机当前数据设为新的云端版本</small>
                 </button>
               </div>
+              <button
+                className="ghost-button"
+                disabled={busy}
+                onClick={() => void beginRecoveryKeyReplacement()}
+              >
+                当前密钥不匹配？更换恢复密钥
+              </button>
             </div>
           </div>
         </div>
