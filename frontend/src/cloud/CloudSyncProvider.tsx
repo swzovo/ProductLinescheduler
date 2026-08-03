@@ -593,6 +593,13 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
     }
   }, [config, reconcile, user]);
 
+  const repairRemoteFromLocal = useCallback(async () => {
+    if (!window.confirm(
+      "确认以这台设备当前显示的排班数据修复云端吗？云端会保留历史修订，但最新版本将改为本机数据。",
+    )) return;
+    await chooseLocal();
+  }, [chooseLocal]);
+
   const showRecoveryKey = useCallback(async () => {
     if (!user) return;
     try {
@@ -999,6 +1006,11 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
                 {!offline && (
                   <button className="secondary-button" disabled={busy} onClick={() => void syncNow()}>
                     {busy ? "同步中…" : "立即同步"}
+                  </button>
+                )}
+                {user && status === "error" && (
+                  <button className="warning-button" disabled={busy} onClick={() => void repairRemoteFromLocal()}>
+                    以本机数据修复云端
                   </button>
                 )}
                 {user && (
