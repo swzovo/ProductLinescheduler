@@ -234,6 +234,7 @@ def test_storage_upload_gets_authorization_on_local_backend(
 
 def test_snapshot_restore_replaces_database_and_keeps_safety_backup(
     cloud_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     user_id = "cloud-user-1"
     key_response = cloud_client.post(
@@ -274,6 +275,10 @@ def test_snapshot_restore_replaces_database_and_keeps_safety_backup(
     assert second.status_code == 201
     assert len(cloud_client.get("/api/parts").json()) == 2
 
+    def reject_live_file_replacement(*_args, **_kwargs):
+        raise AssertionError("恢复流程不能替换正在运行的数据库文件")
+
+    monkeypatch.setattr(Path, "replace", reject_live_file_replacement)
     restored = cloud_client.post(
         f"/api/cloud-sync/restore?user_id={user_id}",
         files={

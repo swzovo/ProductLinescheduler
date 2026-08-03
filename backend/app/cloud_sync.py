@@ -1091,9 +1091,13 @@ async def restore_encrypted_snapshot(
     except ValueError as error:
         temporary.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=str(error)) from error
-    except Exception:
+    except Exception as error:
         temporary.unlink(missing_ok=True)
-        raise
+        reason = str(error).strip() or type(error).__name__
+        raise HTTPException(
+            status_code=500,
+            detail=f"安装云端数据库失败：{reason[:300]}",
+        ) from error
     return {
         "status": "restored",
         "plain_sha256": _sha256(plain),

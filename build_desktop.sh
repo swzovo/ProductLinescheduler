@@ -33,8 +33,8 @@ fi
   "$PWD/desktop_launcher.py"
 
 APP_PATH="$PWD/release/产线排班系统.app"
-plutil -replace CFBundleShortVersionString -string "3.5.10" "$APP_PATH/Contents/Info.plist"
-plutil -replace CFBundleVersion -string "3.5.10" "$APP_PATH/Contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string "3.5.11" "$APP_PATH/Contents/Info.plist"
+plutil -replace CFBundleVersion -string "3.5.11" "$APP_PATH/Contents/Info.plist"
 codesign --force --deep --sign - "$APP_PATH"
 
 echo ""

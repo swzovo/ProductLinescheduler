@@ -169,7 +169,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="单产线整机与跨周排班系统", version="3.5.10", lifespan=lifespan)
+app = FastAPI(title="单产线整机与跨周排班系统", version="3.5.11", lifespan=lifespan)
 app.include_router(cloud_sync_router)
 app.add_middleware(
     CORSMiddleware,

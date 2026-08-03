@@ -339,8 +339,19 @@ export function CloudSyncProvider({ children }: { children: ReactNode }) {
         { method: "POST", body: form },
       );
       if (!response.ok) {
-        const payload = await response.json().catch(() => null);
-        throw new Error(payload?.detail || "云端数据恢复失败");
+        const raw = await response.text().catch(() => "");
+        let detail = "";
+        try {
+          const payload = JSON.parse(raw) as { detail?: unknown };
+          if (typeof payload.detail === "string") detail = payload.detail;
+        } catch {
+          detail = raw.trim().slice(0, 240);
+        }
+        throw new Error(
+          detail
+            ? `云端数据恢复失败（HTTP ${response.status}）：${detail}`
+            : `云端数据恢复失败（HTTP ${response.status}）`,
+        );
       }
       await saveLocalState(activeUser, revision);
       setStatus("synced");

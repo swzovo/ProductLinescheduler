@@ -138,7 +138,12 @@ def validate_database_snapshot(path: Path) -> None:
 
 
 def install_database_snapshot(snapshot: Path) -> Path | None:
-    """原子替换本机数据库，并在替换前保留最近十份安全备份。"""
+    """通过 SQLite Backup API 恢复数据库，并保留最近十份安全备份。
+
+    Windows 不允许替换仍被进程持有的数据库文件。直接把已验证快照
+    backup 到现有数据库既能由 SQLite 负责锁与事务，也能兼容运行中的
+    Windows 桌面程序。
+    """
     validate_database_snapshot(snapshot)
     target = database_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -150,11 +155,16 @@ def install_database_snapshot(snapshot: Path) -> Path | None:
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             backup_path = backup_dir / f"scheduler-before-cloud-{stamp}.db"
             create_consistent_backup(backup_path)
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(f"{target}{suffix}")
-            if sidecar.exists():
-                sidecar.unlink()
-        snapshot.replace(target)
+
+        source = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
+        destination = sqlite3.connect(target, timeout=30)
+        try:
+            source.backup(destination)
+            destination.commit()
+        finally:
+            destination.close()
+            source.close()
+        snapshot.unlink(missing_ok=True)
         init_db()
 
         if backup_path is not None:
